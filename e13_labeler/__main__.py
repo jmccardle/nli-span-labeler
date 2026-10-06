@@ -9,6 +9,7 @@ Command-line entry point.
     python -m e13_labeler export [--kind ...] [--batch ...] [--permissions ...] [--no-text] ...
     python -m e13_labeler agreement [--batch ...]
     python -m e13_labeler gold {list | import FILE | promote ITEM --from L01 | retire ITEM}
+    python -m e13_labeler migrate-spans [--dry-run]                # pre-V8 pointer spans -> rendered offsets
     python -m e13_labeler backup [--dir DIR]                       # NFR-6; the server also backs up nightly
     python -m e13_labeler serve [--host 127.0.0.1] [--port 8000] [--reload]
 """
@@ -260,6 +261,50 @@ def cmd_backup(args) -> int:
     return 0
 
 
+def cmd_migrate_spans(args) -> int:
+    """
+    Convert spans stored before schema V8 (JSON pointers, no renderer) to offsets
+    into the canonical rendering (API_CONTRACT rule 7 as amended 2026-10-06).
+    A bare pointer becomes the whole field, key and value. Spans are updated in
+    place (they can't be deleted, NFR-6), each conversion is audit-logged, and
+    a backup is taken first.
+    """
+    from .backup import backup
+    from .render_state import RENDERER, pointer_to_range, render_state
+
+    init_db()
+    if not args.dry_run:
+        print(json.dumps({"backup": backup(None)["path"]}))
+    n = 0
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT s.*, i.state, i.state_format FROM spans s JOIN annotations a ON a.id = s.annotation_id
+               JOIN items i ON i.item_id = a.item_id WHERE s.side = 'state' AND s.renderer IS NULL""").fetchall()
+        for s in rows:
+            rendered = render_state(s["state"], s["state_format"])
+            if s["pointer"] is not None:
+                start, end = pointer_to_range(rendered, s["pointer"], s["start"], s["end"])
+            else:
+                start, end = s["start"], s["end"]
+            text = rendered.text[start:end]
+            if s["pointer"] is None and text != s["text"]:
+                print(f"span {s['id']}: stored text no longer matches the rendering; left as is", file=sys.stderr)
+                continue
+            change = {"from": {"pointer": s["pointer"], "start": s["start"], "end": s["end"], "text": s["text"]},
+                      "to": {"start": start, "end": end, "text": text, "renderer": RENDERER}}
+            print(json.dumps({"span": s["id"], **change}, ensure_ascii=False))
+            n += 1
+            if args.dry_run:
+                continue
+            conn.execute('UPDATE spans SET pointer = NULL, start = ?, "end" = ?, text = ?, renderer = ? WHERE id = ?',
+                         (start, end, text, RENDERER, s["id"]))
+            audit(conn, None, "span_migrate", str(s["id"]), change)
+        if args.dry_run:
+            conn.rollback()
+    print(f"{'would convert' if args.dry_run else 'converted'} {n} span(s)")
+    return 0
+
+
 def cmd_serve(args) -> int:
     import uvicorn
 
@@ -362,6 +407,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("backup", help="online backup of the database (NFR-6)")
     p.add_argument("--dir", help="destination (default outputs/e13_labeler/backups)")
     p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("migrate-spans", help="convert pre-V8 state spans to offsets into the rendering (rule 7)")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_migrate_spans)
 
     p = sub.add_parser("serve", help="run the web app")
     p.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))

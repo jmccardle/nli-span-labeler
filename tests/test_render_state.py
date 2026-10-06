@@ -128,3 +128,33 @@ def test_training_export_adds_pointers():
     text = [{"side": "state", "start": 0, "end": 4, "renderer": RENDERER}]
     add_pointers(text, "Some text state", "text")
     assert text[0]["pointers"] is None
+
+
+def test_migrate_spans_converts_pre_v8_pointer_spans(db, capsys, monkeypatch, tmp_path):
+    """migrate-spans: legacy pointer spans become offsets into the rendering, audit-logged, nothing deleted."""
+    monkeypatch.setenv("E13_BACKUP_DIR", str(tmp_path / "backups"))
+    from e13_labeler.__main__ import main
+    from e13_labeler.db import get_db
+
+    state = json.dumps(TRACE)
+    with get_db() as conn:
+        conn.execute("""INSERT INTO items (item_id, row_id, qid, source, split, state, state_format, state_sha256,
+                        question_json, permissions, visibility) VALUES ('t#q', 't', 'q', 'x', 'eval', ?, 'json', 'h',
+                        '{"type": "noul"}', 'libre', 'libre')""", (state,))
+        lid = conn.execute("INSERT INTO labelers (pseudonym, kind, role, clearance, status) "
+                           "VALUES ('L09', 'human', 'labeler', 'public', 'active')").lastrowid
+        aid = conn.execute("INSERT INTO annotations (item_id, labeler_id, version, answerable, reasons_json) "
+                           "VALUES ('t#q', ?, 1, 1, '{}')", (lid,)).lastrowid
+        for ptr, s, e, text in (("/trace_summary/steps", None, None, "steps"), ("/constraints/1", 13, 23, "production")):
+            conn.execute('INSERT INTO spans (annotation_id, side, pointer, start, "end", text, role) '
+                         "VALUES (?, 'state', ?, ?, ?, ?, 'support')", (aid, ptr, s, e, text))
+    assert main(["migrate-spans"]) == 0
+    with get_db() as conn:
+        rows = conn.execute('SELECT pointer, start, "end", text, renderer FROM spans ORDER BY id').fetchall()
+        audits = conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'span_migrate'").fetchone()[0]
+    rendered = render_state(state).text
+    for r in rows:
+        assert r["pointer"] is None and r["renderer"] == RENDERER and rendered[r["start"]:r["end"]] == r["text"]
+    assert [r["text"] for r in rows] == ["steps: 5", "production"]
+    assert audits == 2
+    assert "converted 2 span(s)" in capsys.readouterr().out
