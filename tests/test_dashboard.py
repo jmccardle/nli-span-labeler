@@ -31,9 +31,11 @@ class TestWords:
     def test_json_and_option_units(self):
         state = json.dumps({"alert": {"msg": "disk full on host", "n": 3}})
         span = {"side": "state", "pointer": "/alert/msg", "start": 5, "end": 9}
-        assert sa.span_units(span, state, "json", {}) == ["state/alert/msg|1"]
-        assert sa.span_units({"side": "state", "pointer": "/alert/n"}, state, "json", {}) == ["state/alert/n|value"]
-        assert sa.state_universe(state, "json") == [f"state/alert/msg|{i}" for i in range(4)]
+        # Units are words of the rendering "alert:\n  msg: disk full on host\n  n: 3" (rule 7, amended)
+        assert sa.span_units(span, state, "json", {}) == ["state|3"]                     # legacy pointer form
+        assert sa.span_units({"side": "state", "pointer": "/alert/n"}, state, "json", {}) == ["state|6", "state|7"]
+        assert sa.span_units({"side": "state", "start": 15, "end": 24}, state, "json", {}) == ["state|2", "state|3"]
+        assert sa.state_universe(state, "json") == [f"state|{i}" for i in range(8)]
         q = {"type": "choice", "criteria": {"a": "The disk is full", "b": "Fine"}}
         assert sa.span_units({"side": "option", "option": "a", "start": 4, "end": 8}, state, "json", q) == ["option:a|1"]
 

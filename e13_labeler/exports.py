@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+from .render_state import range_to_evidence, render_state
 from . import config
 from .analysis import agreement_record, report
 from .db import audit
@@ -65,13 +66,31 @@ def merge_spans(records: Sequence[dict]) -> tuple[list, list]:
     for m in merged.values():
         s = m["span"]
         out = {"side": s["side"], "pointer": s["pointer"], "start": s["start"], "end": s["end"],
-               "text": s["text"], "role": s["role"], "option": s["option"]}
+               "text": s["text"], "role": s["role"], "option": s["option"], "renderer": s.get("renderer")}
         if m["reasons"]:
             abstain.append({**out, "reasons": sorted(m["reasons"], key=REASONS.index), "votes": len(m["labelers"])})
         else:
             plain.append({**out, "votes": len(m["labelers"])})
     order = lambda x: (x["side"], x["pointer"] or "", x["start"] if x["start"] is not None else -1, x["role"])
     return sorted(abstain, key=order), sorted(plain, key=order)
+
+
+def add_pointers(spans: list, state: str, state_format: str) -> None:
+    """
+    API_CONTRACT rule 7 (amended 2026-10-06): state-side offsets index into the
+    canonical rendering; ``pointers`` gives the same evidence as RFC 6901
+    pointers into the JSON state (null for text states, where offsets already
+    index into the state as sent).
+    """
+    rendered = None
+    for s in spans:
+        s["pointers"] = None
+        if s["side"] != "state" or s["start"] is None:
+            continue
+        rendered = rendered or render_state(state, state_format)
+        if rendered.format == "json":
+            s["pointers"] = [{k: e[k] for k in ("pointer", "start", "end")}
+                             for e in range_to_evidence(rendered, s["start"], s["end"])]
 
 
 def _majority(votes: int, n: int) -> Optional[bool]:
@@ -147,6 +166,7 @@ def training_rows(conn: sqlite3.Connection, filters: Filters, text_included: boo
             elif m is None:
                 ties.append(reason)
         abstain_evidence, plain_evidence = merge_spans(recs)
+        add_pointers(abstain_evidence + plain_evidence, item["state"], item["state_format"])
         adjudication = adjudicated(conn, item_id)
         guideline_versions = sorted({b["guideline_version"] for b in batches if b["guideline_version"]})
 

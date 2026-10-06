@@ -107,7 +107,7 @@ def load_annotations(conn: sqlite3.Connection, filters: Filters = Filters()) -> 
                 spans_by_ann.setdefault(s["annotation_id"], []).append({
                     "side": s["side"], "pointer": s["pointer"], "start": s["start"], "end": s["end"],
                     "text": s["text"], "role": s["role"], "option": s["option"],
-                    "reasons": json.loads(s["reasons_json"]),
+                    "reasons": json.loads(s["reasons_json"]), "renderer": s["renderer"],
                 })
     return [_record(r, spans_by_ann.get(r["id"], [])) for r in rows]
 

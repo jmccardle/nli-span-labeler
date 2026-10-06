@@ -9,6 +9,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .render_state import RENDERER, pointer_to_range, render_state
 from .reasons import DEFAULT_SPAN_POLICY, HARD_SPAN_RULES, NOTE_PROMPTING, REASONS, SPAN_ROLES
 
 NOTE_MAX_CHARS = 2000
@@ -33,6 +34,17 @@ class PolicyViolation(SubmissionError):
 # ============================================================================
 # Questions and options
 # ============================================================================
+
+def state_view(state: str, state_format: str) -> dict:
+    """
+    What the UI renders and selects in: the canonical rendering (render_state.py)
+    and its key ranges for styling. State-side span offsets index into
+    ``state_rendered``; for a text state it equals ``state``.
+    """
+    rendered = render_state(state, state_format)
+    return {"state_rendered": rendered.text, "state_keys": [list(k) for k in rendered.key_ranges()],
+            "renderer": RENDERER}
+
 
 def blind_question(question: dict) -> dict:
     return {k: question[k] for k in QUESTION_KEYS if k in question}
@@ -108,6 +120,7 @@ class Span:
     start: Optional[int] = None
     end: Optional[int] = None
     reasons: list = field(default_factory=list)
+    renderer: Optional[str] = None   # state side: the renderer its offsets index into (render_state.RENDERER)
 
 
 @dataclass
@@ -160,34 +173,32 @@ def validate_span(span: Span, index: int, state: str, state_format: str, questio
             return [f"{where}: option {span.option!r} has no description to select from"]
         if not has_offsets:
             return [f"{where}: option-side spans need start and end"]
-    elif state_format == "text":
+    else:
+        # State side (API_CONTRACT rule 7, amended 2026-10-06): offsets index into the
+        # canonical rendering, which for a text state is the state itself. A JSON
+        # pointer (with offsets into a string value, or bare for a whole field) is
+        # accepted from files and converted here, so every stored span has one form.
+        rendered = render_state(state, state_format)
         if span.pointer is not None:
-            return [f"{where}: text states take offsets, not a pointer"]
+            if rendered.format == "text":
+                return [f"{where}: text states take offsets, not a pointer"]
+            try:
+                start, end = pointer_to_range(rendered, span.pointer, span.start, span.end)
+            except KeyError as e:
+                return [f"{where}: {e.args[0]}"]
+            if has_offsets and rendered.text[start:end] != span.text:
+                return [f"{where}: text {span.text!r} is not the slice [{span.start}:{span.end}] of {span.pointer}"]
+            span.pointer, span.start, span.end, span.text = None, start, end, rendered.text[start:end]
+            has_offsets = True
         if not has_offsets:
             return [f"{where}: start and end are required"]
-        target = state
-    else:
-        if span.pointer is None:
-            return [f"{where}: JSON states need a pointer"]
-        try:
-            _parent, token, value = resolve_pointer(json.loads(state), span.pointer)
-        except KeyError as e:
-            return [f"{where}: pointer {span.pointer!r} does not resolve ({e})"]
-        if not has_offsets:
-            # The pointer alone marks a whole scalar, or a key.
-            if isinstance(value, (dict, list)):
-                if span.text != token:
-                    return [f"{where}: a bare pointer to an object or array marks its key, {token!r}"]
-                return []
-            if span.text not in (scalar_text(value), token):
-                return [f"{where}: text does not match the value at {span.pointer}"]
-            return []
-        if not isinstance(value, str):
-            return [f"{where}: offsets need a string value at {span.pointer}"]
-        target = value
+        span.renderer = RENDERER
+        target = rendered.text
 
     if span.end > len(target) or target[span.start:span.end] != span.text:
         return [f"{where}: text {span.text!r} is not the slice [{span.start}:{span.end}]"]
+    if span.text != span.text.strip():
+        return [f"{where}: spans start and end on a non-space character"]
     return []
 
 

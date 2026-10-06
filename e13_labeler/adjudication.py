@@ -20,7 +20,7 @@ from typing import Optional
 from .db import audit
 from .gold import _validate as validate_answer
 from .gold import get_gold, save_gold
-from .labelling import blind_question
+from .labelling import blind_question, state_view
 from .reasons import REASONS
 from .records import Filters, load_annotations
 
@@ -101,6 +101,7 @@ def detail(conn: sqlite3.Connection, item_id: str, filters: Filters) -> dict:
     asked = [k for k in REASONS if any((r["reasons"] or {}).get(k) is not None for r in recs)]
     return {
         "item_id": item_id, "state": item["state"], "state_format": item["state_format"],
+        **state_view(item["state"], item["state_format"]),
         "question": blind_question(json.loads(item["question_json"])), "reason_set": asked,
         "labels": labels, "disagree_on": disagreements(recs),
         "adjudication": as_dict(conn, latest(conn, item_id)), "gold": get_gold(conn, item_id),

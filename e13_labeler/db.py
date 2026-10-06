@@ -387,7 +387,13 @@ CREATE TRIGGER no_update_audit_log BEFORE UPDATE ON audit_log BEGIN
     SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 """
 
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7]
+# V8 (2026-10-06): state-side spans are offsets into the canonical rendering
+# (render_state.py, API_CONTRACT rule 7 as amended); the renderer is recorded.
+SCHEMA_V8 = """
+ALTER TABLE spans ADD COLUMN renderer TEXT;
+"""
+
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8]
 
 
 def connect() -> sqlite3.Connection:

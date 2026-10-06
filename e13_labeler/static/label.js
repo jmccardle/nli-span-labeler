@@ -13,7 +13,7 @@ const NOUL_DEFAULT = { true: 'The statement holds.', false: 'The statement does 
 
 let L = null;           // the item being labelled, and everything the labeler did to it
 let reasonDefs = {};    // reason -> definition, from /api/reasons (shown as tooltips)
-let containers = {};    // container id -> {side, pointer, option, text, bare}
+let containers = {};    // container id -> {side, pointer, option, text}
 
 // ============================================================================
 // Loading and rendering
@@ -84,22 +84,17 @@ function renderItem(item) {
     document.getElementById('hdr-done').textContent = `me: ${p.done_by_me || 0}`;
 
     // State
+    // The canonical rendering (render_state.py, API_CONTRACT rule 7 as amended
+    // 2026-10-06): exactly the text the model reads. JSON states arrive as
+    // indented "key: value" lines; a selection may cover keys and values alike,
+    // and its offsets index into this text.
     const view = document.getElementById('state-view');
-    if (item.state_format === 'json') {
-        let doc;
-        try {
-            doc = JSON.parse(item.state);
-        } catch (e) {
-            doc = item.state;
-        }
-        view.className = 'json-view';
-        view.innerHTML = renderJson(doc, '', 0);
-        document.getElementById('state-meta').textContent = 'json';
-    } else {
-        view.className = 'state-text';
-        view.innerHTML = tokenize(item.state, container({ side: 'state', pointer: null, text: item.state }));
-        document.getElementById('state-meta').textContent = `text ${cpLength(item.state).toLocaleString()}c`;
-    }
+    const shown = item.state_rendered ?? item.state;
+    view.className = item.state_format === 'json' ? 'state-text json-rendered' : 'state-text';
+    view.innerHTML = tokenize(shown, container({ side: 'state', pointer: null, text: shown }));
+    markKeys(view, item.state_keys || []);
+    document.getElementById('state-meta').textContent = item.state_format === 'json'
+        ? 'json' : `text ${cpLength(shown).toLocaleString()}c`;
     document.getElementById('state-pane').scrollTop = 0;
 
     renderQuestion(item.question, qid);
@@ -146,37 +141,13 @@ function codePoints(cid) {
     return c.cps;
 }
 
-function escapePointerToken(key) {
-    return String(key).replace(/~/g, '~0').replace(/\//g, '~1');
-}
-
-function bareToken(text, cls, info) {
-    const cid = container({ ...info, text, bare: true });
-    return `<span class="tok w ${cls}" data-c="${cid}" data-s="0" data-e="${cpLength(text)}">${escapeHtml(text)}</span>`;
-}
-
-// JSON states are pretty-printed for reading; every span is still stored as a
-// pointer plus offsets into the original string value (FR-17, §6.3).
-function renderJson(value, pointer) {
-    if (value !== null && typeof value === 'object') {
-        const entries = Array.isArray(value) ? value.map((v, i) => [String(i), v]) : Object.entries(value);
-        const open = Array.isArray(value) ? '[' : '{', close = Array.isArray(value) ? ']' : '}';
-        if (!entries.length) return `<span class="json-punct">${open}${close}</span>`;
-        return entries.map(([k, v]) => {
-            const ptr = `${pointer}/${escapePointerToken(k)}`;
-            const key = Array.isArray(value)
-                ? `<span class="json-punct">${escapeHtml(k)}</span>`
-                : bareToken(k, 'json-key', { side: 'state', pointer: ptr, key: true });
-            const nested = v !== null && typeof v === 'object';
-            return `<div class="json-row">${key}<span class="json-punct">: </span>${
-                nested ? `<div>${renderJson(v, ptr)}</div>` : renderJson(v, ptr)}</div>`;
-        }).join('');
-    }
-    if (typeof value === 'string') {
-        const cid = container({ side: 'state', pointer, text: value });
-        return `<span class="json-string">${tokenize(value, cid)}</span>`;
-    }
-    return bareToken(JSON.stringify(value), 'json-scalar', { side: 'state', pointer });
+// JSON keys are styled, nothing more: they select like any other word.
+function markKeys(view, keyRanges) {
+    if (!keyRanges.length) return;
+    view.querySelectorAll('.tok').forEach(t => {
+        const a = +t.dataset.s, b = +t.dataset.e;
+        if (keyRanges.some(([s, e]) => a < e && b > s)) t.classList.add('json-key');
+    });
 }
 
 function buildOptions(q) {
@@ -265,8 +236,7 @@ function cidFor(span) {
         const c = containers[cid];
         if (c.side !== span.side) return false;
         if (span.side === 'option') return c.option === span.option;
-        if (span.start == null) return c.pointer === span.pointer && c.bare && c.text === span.text;
-        return (c.pointer ?? null) === (span.pointer ?? null) && !c.bare;
+        return true;  // one state text (the rendering)
     });
 }
 
@@ -388,13 +358,10 @@ function addSpan(role, option) {
 function selectionFromRange(startTok, startOffset, endTok, endOffset, precise) {
     const cid = startTok.dataset.c;
     if (endTok.dataset.c !== cid) {
-        setBanner('A span must stay within one text: the state, one JSON string value or one option.');
+        setBanner('A span must stay within one text: the state or one option.');
         return null;
     }
     const info = containers[cid];
-    if (info.bare) {
-        return { cid, side: info.side, pointer: info.pointer, option: info.option, start: null, end: null, text: info.text };
-    }
     let start, end;
     if (precise) {
         // DOM offsets are UTF-16 units inside the token; convert to code points
@@ -424,14 +391,9 @@ function handleMouseUp(e) {
     const target = e.target.closest ? e.target.closest('.tok') : null;
     if (!sel || sel.isCollapsed) {
         if (target) {
-            const info = containers[target.dataset.c];
-            if (info && info.bare) {
-                L.selection = selectionFromRange(target, 0, target, 0, false);
-            } else {
-                setRegion(target.closest('#options-view') ? 'options' : 'state');
-                L.cursor = regionTokens().indexOf(target);
-                L.selection = null;
-            }
+            setRegion(target.closest('#options-view') ? 'options' : 'state');
+            L.cursor = regionTokens().indexOf(target);
+            L.selection = null;
             paintTokens();
         }
         return;

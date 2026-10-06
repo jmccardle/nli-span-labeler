@@ -5,7 +5,7 @@ it like ``agreement``.
 
 Units are words, as the UI snaps to them (E07 finding 2). A span covers every
 word it overlaps. A unit is ``"<where>|<word index>"``, where ``<where>`` is
-``state``, ``state<pointer>`` for a JSON string value, or ``option:<key>``.
+``state`` (words of the canonical rendering, render_state.py) or ``option:<key>``.
 
 - token F1 and Jaccard: per pair of labelers on an item, per span role, and
   per triggering reason (only pairs where both checked the reason).
@@ -23,6 +23,7 @@ from itertools import combinations
 from typing import Iterable, Mapping, Optional, Sequence
 
 from .reasons import REASONS
+from .render_state import pointer_to_range, render_state
 
 WORD = re.compile(r"\w+(?:['’]\w+)*")
 ROLES = ("support", "refute", "unsupported", "framing")
@@ -40,39 +41,18 @@ def words(text: str) -> list[tuple[int, int]]:
     return [(m.start(), m.end()) for m in WORD.finditer(text)]
 
 
-def _pointer_value(doc, pointer: str):
-    value = doc
-    for raw in pointer[1:].split("/") if pointer else []:
-        token = raw.replace("~1", "/").replace("~0", "~")
-        value = value[int(token)] if isinstance(value, list) else value[token]
-    return value
-
-
-def _strings(doc, pointer: str = ""):
-    """Every string value in a JSON document with its pointer."""
-    if isinstance(doc, str):
-        yield pointer, doc
-    elif isinstance(doc, dict):
-        for k, v in doc.items():
-            yield from _strings(v, f"{pointer}/{str(k).replace('~', '~0').replace('/', '~1')}")
-    elif isinstance(doc, list):
-        for i, v in enumerate(doc):
-            yield from _strings(v, f"{pointer}/{i}")
+def _state_text(state: str, state_format: str) -> str:
+    return render_state(state, state_format).text
 
 
 def state_universe(state: str, state_format: str) -> list[str]:
-    """All word units of a state: the candidate set for AP."""
-    if state_format == "json":
-        try:
-            doc = json.loads(state)
-        except ValueError:
-            return []
-        return [f"state{p}|{i}" for p, s in _strings(doc) for i, _ in enumerate(words(s))]
-    return [f"state|{i}" for i, _ in enumerate(words(state))]
+    """All word units of a state's canonical rendering: the candidate set for AP."""
+    return [f"state|{i}" for i, _ in enumerate(words(_state_text(state, state_format)))]
 
 
 def span_units(span: Mapping, state: str, state_format: str, question: Mapping) -> list[str]:
     """The word units a span covers (see the module docstring)."""
+    start, end = span.get("start"), span.get("end")
     if span["side"] == "option":
         criteria = question.get("criteria")
         option = span.get("option")
@@ -81,19 +61,18 @@ def span_units(span: Mapping, state: str, state_format: str, question: Mapping) 
         else:
             target = (criteria or {}).get(option) if isinstance(criteria, dict) else None
         where = f"option:{option}"
-    elif state_format == "json":
-        try:
-            target = _pointer_value(json.loads(state), span.get("pointer") or "")
-        except (ValueError, KeyError, IndexError, TypeError):
+        if not isinstance(target, str):
             return []
-        where = f"state{span.get('pointer') or ''}"
     else:
-        target, where = state, "state"
-    if not isinstance(target, str):
-        return [f"{where}|value"]  # a bare pointer to a number, key, object or array
-    start, end = span.get("start"), span.get("end")
+        rendered = render_state(state, state_format)
+        target, where = rendered.text, "state"
+        if span.get("pointer"):  # a span stored before rendered offsets (schema V8)
+            try:
+                start, end = pointer_to_range(rendered, span["pointer"], start, end)
+            except KeyError:
+                return []
     if start is None:
-        start, end = 0, len(target)  # a bare pointer marks the whole string
+        start, end = 0, len(target)
     return [f"{where}|{i}" for i, (s, e) in enumerate(words(target)) if s < end and e > start]
 
 

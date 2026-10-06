@@ -60,6 +60,7 @@ from .labelling import (
     SubmissionError,
     blind_question,
     item_asof,
+    state_view,
     reasons_json,
     validate_submission,
 )
@@ -775,6 +776,7 @@ def blind_payload(conn, item, batch, labeler: dict, lock_until: str) -> dict:
         "lock_until": lock_until,
         "state": item["state"],
         "state_format": item["state_format"],
+        **state_view(item["state"], item["state_format"]),
         "question": blind_question(json.loads(item["question_json"])),
         "reason_set": reason_set,
         "task_type": batch["task_type"],
@@ -899,9 +901,11 @@ async def submit_annotation(body: AnnotationIn, labeler: dict = Depends(require_
         annotation_id = cur.lastrowid
         for s in submission.spans:
             conn.execute(
-                """INSERT INTO spans (annotation_id, side, option, pointer, start, "end", text, role, reasons_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (annotation_id, s.side, s.option, s.pointer, s.start, s.end, s.text, s.role, json.dumps(s.reasons)),
+                """INSERT INTO spans (annotation_id, side, option, pointer, start, "end", text, role, reasons_json,
+                                   renderer)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (annotation_id, s.side, s.option, s.pointer, s.start, s.end, s.text, s.role, json.dumps(s.reasons),
+                 s.renderer),
             )
         release_lock(conn, item["item_id"], labeler["id"])
         if probe:  # FR-30; no feedback, so the response looks like any other save
@@ -953,7 +957,8 @@ def _edit_target(conn, labeler: dict, annotation_id: int):
 
 def _stored_spans(conn, annotation_id: int) -> list:
     return [{"side": s["side"], "role": s["role"], "text": s["text"], "option": s["option"], "pointer": s["pointer"],
-             "start": s["start"], "end": s["end"], "reasons": json.loads(s["reasons_json"])}
+             "start": s["start"], "end": s["end"], "reasons": json.loads(s["reasons_json"]),
+             "renderer": s["renderer"]}
             for s in conn.execute("SELECT * FROM spans WHERE annotation_id = ? ORDER BY id", (annotation_id,))]
 
 
@@ -1023,9 +1028,11 @@ async def edit_annotation(annotation_id: int, body: AnnotationIn, labeler: dict 
         )
         for s in submission.spans:
             conn.execute(
-                """INSERT INTO spans (annotation_id, side, option, pointer, start, "end", text, role, reasons_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cur.lastrowid, s.side, s.option, s.pointer, s.start, s.end, s.text, s.role, json.dumps(s.reasons)),
+                """INSERT INTO spans (annotation_id, side, option, pointer, start, "end", text, role, reasons_json,
+                                   renderer)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (cur.lastrowid, s.side, s.option, s.pointer, s.start, s.end, s.text, s.role, json.dumps(s.reasons),
+                 s.renderer),
             )
         if latest["is_gold_probe"]:
             check_auto_pause(conn, labeler)

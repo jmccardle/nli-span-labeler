@@ -988,13 +988,8 @@ body:has(.container.wide) { padding: 10px 16px; }
 
 .state-text { white-space: pre-wrap; word-wrap: break-word; }
 
-.json-view { font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace; font-size: 0.9rem; }
-.json-row { padding-left: 1.2em; }
-.json-key { color: var(--accent); cursor: pointer; }
-.json-key:hover { text-decoration: underline; }
-.json-string { white-space: pre-wrap; }
-.json-scalar { color: var(--warning); }
-.json-punct { color: var(--text-secondary); }
+.json-rendered { font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace; font-size: 0.9rem; }
+.json-key { color: var(--accent); }
 
 .tok { border-radius: 2px; }
 .tok.cursor { outline: 2px solid var(--accent); outline-offset: 1px; }

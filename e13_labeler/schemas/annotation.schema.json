@@ -243,6 +243,13 @@
        ]
       },
       "uniqueItems": true
+     },
+     "renderer": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "state side: the renderer (render_state.py) whose output start/end index into"
      }
     }
    }

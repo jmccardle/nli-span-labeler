@@ -129,9 +129,11 @@ def import_model_labels(conn: sqlite3.Connection, lines: Iterable[str], file_lab
         )
         for s in parsed["spans"]:
             conn.execute(
-                """INSERT INTO spans (annotation_id, side, option, pointer, start, "end", text, role, reasons_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cur.lastrowid, s.side, s.option, s.pointer, s.start, s.end, s.text, s.role, json.dumps(s.reasons)))
+                """INSERT INTO spans (annotation_id, side, option, pointer, start, "end", text, role, reasons_json,
+                                   renderer)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (cur.lastrowid, s.side, s.option, s.pointer, s.start, s.end, s.text, s.role, json.dumps(s.reasons),
+                 s.renderer))
         if parsed["jev"]:
             # Every item of the row; release tier only, since visibility follows the text's
             # licence (owner decision 2026-10-05)

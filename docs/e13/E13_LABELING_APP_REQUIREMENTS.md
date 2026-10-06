@@ -235,12 +235,12 @@ Each requirement is testable. "Test" names the acceptance check.
 
   Test: the API rejects `unsupported` with `side: "state"` and `framing` with `side: "option"`.
 - **FR-16 (MUST)** Each span links to the option it is about (`option`; null for `noul` true/false is stored as `"true"`/`"false"`) and to **one or more reasons** it triggered (`reasons: [...]`). It may link to no reason, as plain evidence. Test: a span with a reason that isn't checked is rejected.
-- **FR-17 (MUST)** Coordinates:
-  - text states: `start`/`end` character offsets into the state string;
-  - JSON states: an RFC 6901 `pointer` plus offsets inside that string value, or the pointer alone for a key or whole scalar (`API_CONTRACT.md` rule 7);
+- **FR-17 (MUST)** Coordinates (amended 2026-10-06 by owner decision, with `API_CONTRACT.md` rule 7):
+  - state-side spans: `start`/`end` character offsets into the **canonical rendering** of the state (`e13_labeler/render_state.py`, renderer `r1`), stored with `renderer`. A text state renders as itself, so this is the state string. A JSON state renders as indented `key: value` lines with sorted keys: the text the model reads and the labeler sees. A span may cover keys and values alike (`constraint_violations: 1` is one span);
+  - RFC 6901 pointers are accepted on input (gold, model-label files) and converted: pointer + offsets index into a string value, a bare pointer is the whole field (key and value, or the subtree). The training export adds `pointers` (the same evidence as rule-7 pointers) for JSON states;
   - option-side spans: `side: "option"`, the option name, and offsets into the option's description string (rule 9).
 
-  The stored `text` must equal the slice. Test: for every stored span, `state[start:end] == text` (or the pointer target's slice).
+  The stored `text` must equal the slice and start and end on a non-space character. Test: for every stored span, `render(state)[start:end] == text`.
 - **FR-18 (MUST)** Selections snap to word boundaries by default. E07 found that annotators mark single words and that word units beat phrases (`e07_dspy_evidence/REPORT.md` finding 2). Holding `Alt` while selecting gives character precision. Test: dragging across "playi|ng a gui|tar" stores "playing a guitar".
 - **FR-19 (SHOULD)** Per-batch span policy per reason: `required` | `optional` | `none`. Proposed defaults:
   - `conflicting_evidence`: required, with ≥1 support and ≥1 refute on the same option. *Owner decision 2026-10-05: a hard rule that no batch policy or override relaxes;*
@@ -443,10 +443,10 @@ There is no `source`, `gold`, `e13`, `model_answers` or `is_gold_probe` field.
              "non_factual_support": false, "stale_state": true, "ambiguous": false,
              "underspecified": true, "false_premise": false, "no_option_fits": false, "subjective": false},
  "spans": [
-   {"side": "state", "pointer": "/alert/evidence", "start": 0, "end": 34,
-    "text": "An unrecognized external source re", "role": "support", "option": "3", "reasons": []},
-   {"side": "state", "pointer": "/alert/timestamp", "start": null, "end": null,
-    "text": "2023-04-02", "role": "support", "option": null, "reasons": ["stale_state"]}],
+   {"side": "state", "pointer": null, "start": 112, "end": 143, "renderer": "r1",
+    "text": "An unrecognized external source", "role": "support", "option": "3", "reasons": []},
+   {"side": "state", "pointer": null, "start": 301, "end": 322, "renderer": "r1",
+    "text": "timestamp: 2023-04-02", "role": "support", "option": null, "reasons": ["stale_state"]}],
  "relation": null,
  "note": "Severity depends on whether the admin account was production; not stated.",
  "skipped": null, "policy_override": false,
@@ -573,7 +573,7 @@ The relation task (FR-23) adds a stance column per option (§6.3). There, `j`/`k
 +----------------------------------------------------------+-----------------------------------+
 ```
 
-The JSON view is pretty-printed for reading, but every span is stored as a pointer plus offsets into the original string value (FR-17).
+Superseded 2026-10-06 (FR-17 as amended): the JSON view *is* the canonical rendering, indented `key: value` lines with sorted keys, so labelers select in exactly the text the model reads, across keys and values. Spans are stored as offsets into that rendering; pointers are derived for the API and the training export.
 
 ### 6.4 Admin agreement dashboard
 

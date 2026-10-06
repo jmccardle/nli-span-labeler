@@ -153,7 +153,8 @@ class TestRelabel:
         payload = r.json()
         assert payload["progress"]["batch"] == "b-r2"
         # Blind: nothing of the first pass comes back (span_policy and reason_set name every reason anyway)
-        assert set(payload) == {"item_id", "lock_until", "state", "state_format", "question", "reason_set",
+        assert set(payload) == {"item_id", "lock_until", "state", "state_format", "state_rendered", "state_keys", "renderer",
+                                "question", "reason_set",
                                 "task_type", "span_policy", "require_note", "asof", "progress"}
         second = [payload["item_id"]]
         assert owner_client.post("/api/annotations",

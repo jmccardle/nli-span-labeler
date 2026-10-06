@@ -26,7 +26,7 @@ from typing import Optional
 from . import guideline, quality
 from .db import audit
 from .gold import get_gold
-from .labelling import Span, blind_question, item_asof, validate_span
+from .labelling import Span, blind_question, item_asof, state_view, validate_span
 from .reasons import ESTABLISHED, REASONS
 from .tiers import visible_to
 
@@ -181,6 +181,7 @@ def current(conn: sqlite3.Connection, labeler: dict) -> dict:
         "finished": False, "attempt_id": attempt["id"], "kind": attempt["kind"], "position": row["position"],
         "total": total,
         "item": {"item_id": row["item_id"], "state": row["state"], "state_format": row["state_format"],
+                 **state_view(row["state"], row["state_format"]),
                  "question": blind_question(json.loads(row["question_json"])), "reason_set": list(REASONS),
                  "span_policy": {}, "require_note": False, "asof": item_asof(row), "task_type": "reasons"},
     }
@@ -203,9 +204,13 @@ def answer(conn: sqlite3.Connection, labeler: dict, item_id: str, answerable: bo
     if not answerable and not reasons:
         problems.append("choose answerable or at least one reason")
     item = conn.execute("SELECT * FROM items WHERE item_id = ?", (item_id,)).fetchone()
+    normalised = []
     for i, s in enumerate(spans):
-        problems += validate_span(Span(**s), i, item["state"], item["state_format"],
+        span = Span(**s)
+        problems += validate_span(span, i, item["state"], item["state_format"],
                                   json.loads(item["question_json"]), set(reasons))
+        normalised.append(span.__dict__)
+    spans = normalised
     if problems:
         raise QuizError("; ".join(problems), 422)
     gold = get_gold(conn, item_id)

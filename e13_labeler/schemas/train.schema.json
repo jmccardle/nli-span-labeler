@@ -275,6 +275,46 @@
               "subjective"
              ]
             }
+           },
+           "renderer": {
+            "type": [
+             "string",
+             "null"
+            ],
+            "description": "state side: the renderer (render_state.py) whose output start/end index into"
+           },
+           "pointers": {
+            "type": [
+             "array",
+             "null"
+            ],
+            "description": "JSON states: the same evidence as RFC 6901 pointers (bare = whole field, else offsets into a string value)",
+            "items": {
+             "type": "object",
+             "additionalProperties": false,
+             "required": [
+              "pointer",
+              "start",
+              "end"
+             ],
+             "properties": {
+              "pointer": {
+               "type": "string"
+              },
+              "start": {
+               "type": [
+                "integer",
+                "null"
+               ]
+              },
+              "end": {
+               "type": [
+                "integer",
+                "null"
+               ]
+              }
+             }
+            }
            }
           }
          }
@@ -341,6 +381,46 @@
          "votes": {
           "type": "integer",
           "minimum": 1
+         },
+         "renderer": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "description": "state side: the renderer (render_state.py) whose output start/end index into"
+         },
+         "pointers": {
+          "type": [
+           "array",
+           "null"
+          ],
+          "description": "JSON states: the same evidence as RFC 6901 pointers (bare = whole field, else offsets into a string value)",
+          "items": {
+           "type": "object",
+           "additionalProperties": false,
+           "required": [
+            "pointer",
+            "start",
+            "end"
+           ],
+           "properties": {
+            "pointer": {
+             "type": "string"
+            },
+            "start": {
+             "type": [
+              "integer",
+              "null"
+             ]
+            },
+            "end": {
+             "type": [
+              "integer",
+              "null"
+             ]
+            }
+           }
+          }
          }
         }
        }

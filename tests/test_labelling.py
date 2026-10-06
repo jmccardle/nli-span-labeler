@@ -19,6 +19,7 @@ from e13_labeler.labelling import (
     validate_submission,
 )
 from e13_labeler.reasons import DEFAULT_SPAN_POLICY, REASONS
+from e13_labeler.render_state import RENDERER, render_state
 from tests.conftest import login, make_labeler
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_pool.jsonl"
@@ -135,21 +136,36 @@ class TestRules:
             check(sub(answerable=True, spans=[Span(side="state", role="support", text="sharp", start=41, end=46)]),
                   state=state)
 
-    def test_json_pointer_spans(self):
-        """FR-17 for JSON states: pointer + offsets in a string value, or a bare pointer."""
+    def test_json_spans_index_the_rendering(self):
+        """
+        FR-17 / rule 7 (amended 2026-10-06): state spans are offsets into the
+        canonical rendering. Pointers are accepted (from files) and converted:
+        offsets into a string value, or bare for the whole field (key + value).
+        """
         state = json.dumps({"alert": {"evidence": "84 failed attempts", "count": 84, "tags": ["a"]}})
+        rendered = render_state(state, "json").text
+        assert rendered == "alert:\n  count: 84\n  evidence: 84 failed attempts\n  tags:\n    - a"
         q = {"type": "noul"}
-        ok = [
+        field = rendered.index("count: 84")
+        spans = [
+            Span(side="state", role="support", text="count: 84", start=field, end=field + 9),   # key + value
             Span(side="state", role="support", text="failed", pointer="/alert/evidence", start=3, end=9),
             Span(side="state", role="support", text="84", pointer="/alert/count"),
-            Span(side="state", role="support", text="tags", pointer="/alert/tags"),
         ]
-        check(sub(answerable=True, spans=ok), state=state, state_format="json", question=q)
+        check(sub(answerable=True, spans=spans), state=state, state_format="json", question=q)
+        failed = rendered.index("failed")
+        assert [(s.pointer, s.start, s.end, s.text, s.renderer) for s in spans] == [
+            (None, field, field + 9, "count: 84", RENDERER),
+            (None, failed, failed + 6, "failed", RENDERER),
+            (None, field, field + 9, "count: 84", RENDERER),
+        ]
         for bad, msg in [
             (Span(side="state", role="support", text="failed", pointer="/alert/nope", start=3, end=9), "does not resolve"),
             (Span(side="state", role="support", text="84", pointer="/alert/count", start=0, end=2), "string value"),
-            (Span(side="state", role="support", text="failed", start=3, end=9), "need a pointer"),
             (Span(side="state", role="support", text="fail", pointer="/alert/evidence", start=3, end=9), "not the slice"),
+            (Span(side="state", role="support", text="failed", start=3, end=9), "not the slice"),
+            (Span(side="state", role="support", text="count: 84\n", start=field, end=field + 10), "non-space"),
+            (Span(side="state", role="support", text="count: 84"), "start and end are required"),
         ]:
             with pytest.raises(SubmissionError, match=msg):
                 check(sub(answerable=True, spans=[bad]), state=state, state_format="json", question=q)
@@ -226,7 +242,8 @@ class TestNextIsBlind:
         """FR-12 / §5.3: none of gold, source, e13, model_answers, is_gold_probe, others' labels."""
         only_item(f"{ALERT}#severity")
         payload = owner_client.get("/api/next").json()
-        assert set(payload) == {"item_id", "lock_until", "state", "state_format", "question", "reason_set",
+        assert set(payload) == {"item_id", "lock_until", "state", "state_format", "state_rendered", "state_keys", "renderer",
+                                "question", "reason_set",
                                 "task_type", "span_policy", "require_note", "asof", "progress"}
         assert set(payload["question"]) <= {"type", "instructions", "criteria"}
         assert payload["asof"] == "2026-10-05"  # from the row's e13.asof
