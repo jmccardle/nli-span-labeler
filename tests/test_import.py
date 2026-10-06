@@ -278,3 +278,30 @@ class TestPoolShapes:
         span = Span(side="option", role="unsupported", text="spoon", option=key, start=6, end=11)
         validate_submission(Submission(True, [], None, [span], False, None), state="s", state_format="text",
                             question=q, reason_set=["unrelated"], span_policy={}, require_note=False)
+
+
+class TestLineSeparators:
+    """JSON allows U+0085 / U+2028 / U+2029 raw inside strings; JSONL splits on \\n only."""
+
+    def test_raw_unicode_separators_in_state(self, db, tmp_path):
+        from e13_labeler.db import get_db
+
+        state = "Line one\u0085still one and more"
+        row = {"id": "sep/eval/1", "source": "imdb", "split": "eval", "heldout": False, "state": state,
+               "questions": {"q0": {"type": "noul", "instructions": "Is it positive?"}}, "permissions": "libre"}
+        path = tmp_path / "sep.jsonl"
+        path.write_bytes((json.dumps(row, ensure_ascii=False) + "\r\n").encode("utf-8"))
+        with get_db() as conn:
+            report = import_file(conn, path, batch="sep")
+            stored = conn.execute("SELECT state FROM items WHERE item_id = 'sep/eval/1#q0'").fetchone()
+        assert (report.n_rows, report.n_rejected) == (1, 0)
+        assert stored["state"] == state
+
+    def test_admin_upload_keeps_separators(self, db, owner_client):
+        state = "a\u0085b"
+        row = {"id": "sep/eval/2", "source": "imdb", "split": "eval", "heldout": False, "state": state,
+               "questions": {"q0": {"type": "noul", "instructions": "Is it positive?"}}, "permissions": "libre"}
+        resp = owner_client.post("/api/admin/import", json={"content": json.dumps(row, ensure_ascii=False) + "\n",
+                                                            "filename": "sep.jsonl"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["n_rows"] == 1 and resp.json()["n_rejected"] == 0

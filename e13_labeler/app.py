@@ -1280,11 +1280,11 @@ async def admin_import(body: ImportIn, admin: dict = Depends(require_admin)):
     """
     import hashlib
 
-    from .importer import import_rows
+    from .importer import import_rows, jsonl_lines
 
     data = body.content.encode("utf-8")
     with get_db() as conn:
-        report = import_rows(conn, body.content.splitlines(), f"upload:{body.filename}",
+        report = import_rows(conn, jsonl_lines(body.content), f"upload:{body.filename}",
                              hashlib.sha256(data).hexdigest(), batch=body.batch or None, replace=body.replace,
                              actor_id=admin["id"], actor=admin["pseudonym"])
     out = report.as_dict()

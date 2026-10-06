@@ -332,7 +332,19 @@ def import_rows(
     return report
 
 
+def jsonl_lines(text: str) -> list[str]:
+    """
+    JSONL records split on newline only. str.splitlines() also breaks on U+0085,
+    U+2028, U+2029 and other separators that JSON allows raw inside strings
+    (one row of the E09 eval pool has U+0085 in its state).
+    """
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
 def import_file(conn: sqlite3.Connection, path: Path, **kwargs) -> ImportReport:
     data = Path(path).read_bytes()
     file_sha = hashlib.sha256(data).hexdigest()
-    return import_rows(conn, data.decode("utf-8").splitlines(), str(path), file_sha, **kwargs)
+    return import_rows(conn, jsonl_lines(data.decode("utf-8")), str(path), file_sha, **kwargs)
