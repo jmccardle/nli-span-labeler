@@ -29,7 +29,7 @@ from .records import Filters, item_filter_sql, load_annotations, public
 
 TRAIN_SCHEMA = "e13.train/1"
 MANIFEST_SCHEMA = "e13.export-manifest/1"
-KINDS = ("annotations", "training", "agreement", "items", "clauses")
+KINDS = ("annotations", "training", "agreement", "items", "clauses", "history")
 
 
 def _dumps(obj) -> str:
@@ -273,6 +273,88 @@ def clause_agreement_document(conn: sqlite3.Connection, filters: Filters, n_boot
 
 
 # ============================================================================
+# Annotation history (docs/e13/ANNOTATOR.md §9): the process, not just the result
+# ============================================================================
+
+HISTORY_SCHEMA = "e13.history/1"
+HEDGE_WORDS = ("i think", "maybe", "probably", "might", "could be", "not sure", "perhaps", "i guess", "kind of",
+               "sort of", "unless", "or maybe")
+
+
+def history_rows(conn: sqlite3.Connection, filters: Filters, text_included: bool = True) -> list[dict]:
+    """
+    One row per (item, labeler, batch) of a clauses batch with any activity: every
+    annotation version, utterance, proposal and note, in order, and the signals
+    that mark a hard item (versions, label flips, hedges, rejected proposals,
+    agent questions, time spent).
+    """
+    from .clauses import stored_clauses
+
+    item_sql, params = item_filter_sql(filters)
+    sql = f"""SELECT DISTINCT a.item_id, a.labeler_id, a.batch_id FROM annotations a JOIN items i ON i.item_id = a.item_id
+              JOIN batches b ON b.id = a.batch_id WHERE b.task_type = 'clauses' AND {item_sql}
+              UNION SELECT DISTINCT u.item_id, u.labeler_id, u.batch_id FROM utterances u JOIN items i ON i.item_id = u.item_id
+              JOIN batches b ON b.id = u.batch_id WHERE b.task_type = 'clauses' AND {item_sql}"""
+    keys = conn.execute(sql, (*params, *params)).fetchall()
+    batch_names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM batches")}
+    if filters.batches:
+        keys = [k for k in keys if batch_names.get(k["batch_id"]) in filters.batches]
+    rows = []
+    for k in sorted(keys, key=lambda k: (k["item_id"], k["labeler_id"], k["batch_id"] or 0)):
+        item_id, lid, bid = k["item_id"], k["labeler_id"], k["batch_id"]
+        lab = conn.execute("SELECT pseudonym, kind FROM labelers WHERE id = ?", (lid,)).fetchone()
+        if not filters.include_models and lab["kind"] != "human":
+            continue
+        anns = conn.execute("SELECT * FROM annotations WHERE item_id = ? AND labeler_id = ? AND batch_id IS ? "
+                            "ORDER BY version", (item_id, lid, bid)).fetchall()
+        clauses = stored_clauses(conn, [a["id"] for a in anns])
+        accepted = {p["accepted_annotation_id"]: p["id"] for p in conn.execute(
+            "SELECT id, accepted_annotation_id FROM proposals WHERE accepted_annotation_id IS NOT NULL")}
+        versions = [{"version": a["version"], "label": a["label"], "label_derived": a["label_derived"],
+                     "skipped": a["skipped_code"], "clauses": [{"text": c["text"], "start": c["start"], "end": c["end"],
+                                                                "stance": c["stance"], "omission": c["omission"],
+                                                                "evidence": [e["text"] for e in c["evidence"]]}
+                                                               for c in clauses.get(a["id"], [])],
+                     "from_proposal": accepted.get(a["id"]), "active_ms": a["active_ms"],
+                     "created_at": a["created_at"]} for a in anns]
+        utts = [{"id": u["id"], "kind": u["kind"], "source": u["source"], "duration_ms": u["duration_ms"],
+                 "text": u["text"] if text_included else None, "transcribed": u["text"] is not None,
+                 "stt_engine": u["stt_engine"], "created_at": u["created_at"]}
+                for u in conn.execute("SELECT * FROM utterances WHERE item_id = ? AND labeler_id = ? AND batch_id IS ? "
+                                      "ORDER BY id", (item_id, lid, bid))]
+        props = []
+        for p in conn.execute("SELECT * FROM proposals WHERE item_id = ? AND labeler_id = ? AND batch_id IS ? "
+                              "ORDER BY id", (item_id, lid, bid)):
+            payload = json.loads(p["payload_json"] or "{}")
+            props.append({"id": p["id"], "status": p["status"], "label": payload.get("label"),
+                          "questions": payload.get("questions") or [], "problems": json.loads(p["problems_json"]),
+                          "utterance_ids": json.loads(p["utterance_ids_json"]), "engine": p["engine"],
+                          "created_at": p["created_at"], "reviewed_at": p["reviewed_at"]})
+        notes = [{"category": n["category"], "text": n["text"] if text_included else None, "hedge": bool(n["hedge"]),
+                  "nodes": json.loads(n["target_json"]).get("nodes", []), "source": n["source"],
+                  "retracted": n["retracted_at"] is not None, "created_at": n["created_at"]}
+                 for n in conn.execute("SELECT * FROM notes WHERE item_id = ? AND labeler_id = ? ORDER BY id",
+                                       (item_id, lid))]
+        labels = [v["label"] for v in versions if v["label"]]
+        spoken = " ".join((u["text"] or "") for u in utts).lower()
+        rows.append({
+            "schema": HISTORY_SCHEMA, "item_id": item_id, "batch": batch_names.get(bid), "labeler": lab["pseudonym"],
+            "labeler_kind": lab["kind"], "versions": versions, "utterances": utts, "proposals": props, "notes": notes,
+            "signals": {
+                "n_versions": len(versions), "label_flips": sum(1 for a, b in zip(labels, labels[1:]) if a != b),
+                "final_label": labels[-1] if labels else None,
+                "hedged_notes": sum(1 for n in notes if n["hedge"] and not n["retracted"]),
+                "hedge_words_spoken": sum(spoken.count(w) for w in HEDGE_WORDS),
+                "rejected_proposals": sum(1 for p in props if p["status"] == "rejected"),
+                "agent_questions": sum(len(p["questions"]) for p in props),
+                "utterances": len(utts), "audio_ms": sum(u["duration_ms"] or 0 for u in utts),
+                "active_ms": sum(v["active_ms"] or 0 for v in versions),
+            },
+        })
+    return rows
+
+
+# ============================================================================
 # FR-5 items (pool import format)
 # ============================================================================
 
@@ -377,9 +459,9 @@ def _sha256(path: Path) -> str:
 
 
 def default_kinds(conn: sqlite3.Connection) -> tuple:
-    """Every kind; clauses only when a clauses batch exists."""
+    """Every kind; clauses and history only when a clauses batch exists."""
     has_clauses = conn.execute("SELECT 1 FROM batches WHERE task_type = 'clauses' LIMIT 1").fetchone()
-    return tuple(k for k in KINDS if k != "clauses" or has_clauses)
+    return tuple(k for k in KINDS if k not in ("clauses", "history") or has_clauses)
 
 
 def write_export(conn: sqlite3.Connection, kinds: Optional[Sequence[str]] = None, filters: Filters = Filters(),
@@ -401,6 +483,8 @@ def write_export(conn: sqlite3.Connection, kinds: Optional[Sequence[str]] = None
                                                      training_rows(conn, filters, text_included))))
     if "clauses" in kinds:
         files.append(("clauses.jsonl", _write_jsonl(out / "clauses.jsonl", clause_rows(conn, filters, text_included))))
+    if "history" in kinds:
+        files.append(("history.jsonl", _write_jsonl(out / "history.jsonl", history_rows(conn, filters, text_included))))
     if "items" in kinds:
         if not text_included:
             raise ValueError("the items export carries state text; it can't be written with text_included off")

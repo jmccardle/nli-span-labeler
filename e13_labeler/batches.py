@@ -103,15 +103,24 @@ def resample(conn: sqlite3.Connection, batch: sqlite3.Row) -> int:
 def configure(conn: sqlite3.Connection, name: str, actor_id=None, *, overlap_target: Optional[int] = None,
               reliability_fraction: Optional[float] = None, reliability_overlap: Optional[int] = None,
               priority: Optional[int] = None, tier_ceiling: Optional[str] = None,
-              require_note: Optional[bool] = None, relabel_after_days: Optional[int] = None) -> dict:
-    """Change a batch's labelling design. Returns the new settings and the subset size."""
+              require_note: Optional[bool] = None, relabel_after_days: Optional[int] = None,
+              mode: Optional[str] = None) -> dict:
+    """
+    Change a batch's labelling design. Returns the new settings and the subset
+    size. ``mode`` curated takes a batch out of the served queue and into annotator
+    mode (docs/e13/ANNOTATOR.md); only clauses batches can be curated.
+    """
     batch = get_batch(conn, name)
     changes = {k: v for k, v in {
         "overlap_target": overlap_target, "reliability_fraction": reliability_fraction,
         "reliability_overlap": reliability_overlap, "priority": priority, "tier_ceiling": tier_ceiling,
         "require_note": None if require_note is None else int(require_note),
-        "relabel_after_days": relabel_after_days,
+        "relabel_after_days": relabel_after_days, "mode": mode,
     }.items() if v is not None}
+    if mode is not None and mode not in ("queue", "curated"):
+        raise ValueError("mode must be queue or curated")
+    if mode == "curated" and batch["task_type"] != "clauses":
+        raise ValueError("only clauses batches can be curated")
     if overlap_target is not None and overlap_target < 1:
         raise ValueError("overlap_target must be at least 1")
     if reliability_fraction is not None and not 0 <= reliability_fraction <= 1:
@@ -147,6 +156,7 @@ def describe(conn: sqlite3.Connection, batch: sqlite3.Row) -> dict:
         "relabel_of": source, "relabel_after_days": batch["relabel_after_days"],
         "tier_ceiling": batch["tier_ceiling"], "priority": batch["priority"],
         "reason_set": json.loads(batch["reason_set_json"]), "require_note": bool(batch["require_note"]),
+        "mode": batch["mode"],
     }
 
 

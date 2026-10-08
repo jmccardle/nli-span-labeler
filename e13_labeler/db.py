@@ -467,7 +467,127 @@ CREATE INDEX idx_clause_evidence_clause ON clause_evidence(clause_id);
     for t in ("clauses", "clause_evidence")
 )
 
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9]
+# V10 (2026-10-08): annotator mode (docs/e13/ANNOTATOR.md). Curated batches;
+# numbered parses; utterances (audio or typed) processed by a job queue
+# (transcribe, agent); agent proposals the owner reviews; notes and relations
+# around the clause annotation. Nothing is deleted: the history is a dataset.
+JOB_KINDS = ("transcribe", "agent")
+JOB_STATUSES = ("queued", "running", "waiting", "done", "failed", "superseded")
+NOTE_CATEGORIES = ("relation", "grammar", "pos", "lexical", "label", "procedure", "other")
+RELATION_TYPES = ("referent", "supports", "suggests", "contradicts", "more_specific", "less_specific", "same_as",
+                  "other")
+
+SCHEMA_V10 = f"""
+ALTER TABLE batches ADD COLUMN mode TEXT NOT NULL DEFAULT 'queue' CHECK (mode IN ('queue', 'curated'));
+
+CREATE TABLE item_parses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT NOT NULL REFERENCES items(item_id),
+    parser TEXT NOT NULL,              -- e.g. spacy/en_core_web_sm-3.8.0+r1
+    nodes_json TEXT NOT NULL,          -- {{"premise": [...], "hypothesis": [...]}}, numbered 1.. across both
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (item_id, parser)
+);
+
+CREATE TABLE utterances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT NOT NULL REFERENCES items(item_id),
+    labeler_id INTEGER NOT NULL REFERENCES labelers(id),
+    batch_id INTEGER REFERENCES batches(id),
+    kind TEXT NOT NULL DEFAULT 'label' CHECK (kind IN ('label', 'followup', 'variation')),
+    source TEXT NOT NULL CHECK (source IN ('audio', 'typed')),
+    audio_path TEXT,
+    audio_mime TEXT,
+    audio_bytes INTEGER,
+    duration_ms INTEGER,
+    text TEXT,
+    segments_json TEXT,
+    stt_engine TEXT,
+    transcribed_at TEXT,
+    parse_id INTEGER REFERENCES item_parses(id),
+    annotation_id INTEGER REFERENCES annotations(id),   -- the labeler's latest version when it was made
+    proposal_id INTEGER,                                 -- a follow-up answers this proposal
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_utterances_item ON utterances(item_id, labeler_id);
+
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN {JOB_KINDS}),
+    item_id TEXT NOT NULL REFERENCES items(item_id),
+    labeler_id INTEGER NOT NULL REFERENCES labelers(id),
+    batch_id INTEGER REFERENCES batches(id),
+    utterance_id INTEGER REFERENCES utterances(id),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN {JOB_STATUSES}),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_try_at TEXT,
+    worker TEXT,
+    engine TEXT,
+    error TEXT,
+    result_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TEXT,
+    finished_at TEXT
+);
+CREATE INDEX idx_jobs_status ON jobs(status, id);
+CREATE INDEX idx_jobs_item ON jobs(item_id, labeler_id);
+
+CREATE TABLE proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT NOT NULL REFERENCES items(item_id),
+    labeler_id INTEGER NOT NULL REFERENCES labelers(id),
+    batch_id INTEGER REFERENCES batches(id),
+    job_id INTEGER REFERENCES jobs(id),
+    utterance_ids_json TEXT NOT NULL DEFAULT '[]',
+    base_annotation_id INTEGER REFERENCES annotations(id),
+    parse_id INTEGER REFERENCES item_parses(id),
+    raw_json TEXT,                      -- the agent's answer as returned (node numbers)
+    payload_json TEXT,                  -- resolved: clauses with offsets, relations, notes, questions
+    problems_json TEXT NOT NULL DEFAULT '[]',
+    engine TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'accepted', 'rejected', 'superseded')),
+    accepted_annotation_id INTEGER REFERENCES annotations(id),
+    reviewed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_proposals_item ON proposals(item_id, labeler_id);
+
+CREATE TABLE notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT NOT NULL REFERENCES items(item_id),
+    labeler_id INTEGER NOT NULL REFERENCES labelers(id),
+    annotation_id INTEGER REFERENCES annotations(id),
+    target_json TEXT NOT NULL DEFAULT '{{}}',   -- {{"nodes": [...]}}
+    category TEXT NOT NULL CHECK (category IN {NOTE_CATEGORIES}),
+    text TEXT NOT NULL,
+    hedge INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL CHECK (source IN ('agent', 'typed')),
+    utterance_id INTEGER REFERENCES utterances(id),
+    proposal_id INTEGER REFERENCES proposals(id),
+    retracted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_notes_item ON notes(item_id, labeler_id);
+
+CREATE TABLE relations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    annotation_id INTEGER NOT NULL REFERENCES annotations(id),
+    idx INTEGER NOT NULL,
+    from_json TEXT NOT NULL,            -- {{"nodes": [...], "spans": [{{"side", "start", "end", "text"}}]}}
+    to_json TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN {RELATION_TYPES}),
+    note TEXT,
+    UNIQUE (annotation_id, idx)
+);
+""" + "".join(
+    f"CREATE TRIGGER no_delete_{t} BEFORE DELETE ON {t} BEGIN "
+    f"SELECT RAISE(ABORT, 'no hard deletes (NFR-6): retire, revoke or version instead'); END;\n"
+    for t in ("item_parses", "utterances", "proposals", "notes", "relations")
+)
+
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9,
+              SCHEMA_V10]
 
 
 def connect() -> sqlite3.Connection:

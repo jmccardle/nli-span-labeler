@@ -106,7 +106,7 @@ def cmd_batch(args) -> int:
                     conn, args.name, overlap_target=args.overlap, reliability_fraction=args.reliability,
                     reliability_overlap=args.reliability_overlap, priority=args.priority,
                     tier_ceiling=args.tier_ceiling, require_note=args.require_note,
-                    relabel_after_days=args.after_days)
+                    relabel_after_days=args.after_days, mode=args.mode)
                 print(json.dumps(result))
             elif args.action == "set-reasons":
                 result = batches.set_reasons(conn, args.name, [r.strip() for r in args.reasons.split(",") if r.strip()],
@@ -314,6 +314,17 @@ def cmd_migrate_spans(args) -> int:
     return 0
 
 
+def cmd_worker(args) -> int:
+    """Annotator mode's job runner (transcribe, agent); engines from E13_STT_URL / E13_AGENT_URL."""
+    from .annotator import work
+
+    init_db()
+    print(f"worker: STT {os.environ.get('E13_STT_URL') or '(not set: transcribe jobs wait)'}; "
+          f"agent {os.environ.get('E13_AGENT_URL') or '(not set: agent jobs wait)'}", flush=True)
+    work(get_db, once=args.once, poll=args.poll, log=lambda s: print(s, flush=True))
+    return 0
+
+
 def cmd_serve(args) -> int:
     import uvicorn
 
@@ -367,6 +378,8 @@ def main(argv=None) -> int:
     c.add_argument("--tier-ceiling")
     c.add_argument("--require-note", action=argparse.BooleanOptionalAction, default=None)
     c.add_argument("--after-days", type=int, help="re-label batches: minimum gap in days")
+    c.add_argument("--mode", choices=("queue", "curated"),
+                   help="curated: browse in annotator mode instead of the served queue (clauses batches)")
     s = bsub.add_parser("set-reasons", help="narrow a reasons batch's reason set (comma-separated)")
     s.add_argument("name")
     s.add_argument("reasons", help="e.g. not_enough_info,conflicting_evidence")
@@ -389,7 +402,8 @@ def main(argv=None) -> int:
         p.add_argument("--seed", type=int, default=0)
 
     p = sub.add_parser("export", help="write annotation / training / agreement / items exports (FR-45..49)")
-    p.add_argument("--kind", action="append", choices=["annotations", "training", "agreement", "items", "clauses"],
+    p.add_argument("--kind", action="append",
+                   choices=["annotations", "training", "agreement", "items", "clauses", "history"],
                    help="what to write (repeatable; default all)")
     p.add_argument("--no-text", action="store_true", help="training rows without state/question text (§5.5)")
     p.add_argument("--out", help="export root (default outputs/e13_labeler/exports)")
@@ -426,6 +440,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("migrate-spans", help="convert pre-V8 state spans to offsets into the rendering (rule 7)")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_migrate_spans)
+
+    p = sub.add_parser("worker", help="run annotator-mode jobs (transcription, agent turns)")
+    p.add_argument("--once", action="store_true", help="run what is runnable now, then exit")
+    p.add_argument("--poll", type=float, default=5.0, help="seconds between polls when idle")
+    p.set_defaults(func=cmd_worker)
 
     p = sub.add_parser("serve", help="run the web app")
     p.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))

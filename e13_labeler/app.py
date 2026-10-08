@@ -630,7 +630,9 @@ class SkipIn(BaseModel):
 
 
 def _open_batches(conn):
-    return conn.execute("SELECT * FROM batches WHERE status = 'open' ORDER BY priority DESC, id").fetchall()
+    # Curated batches are browsed in annotator mode, never served by the queue
+    return conn.execute("SELECT * FROM batches WHERE status = 'open' AND mode = 'queue' ORDER BY priority DESC, id"
+                        ).fetchall()
 
 
 def _batch_filter(batch, labeler: dict) -> tuple[str, list]:
@@ -1425,3 +1427,9 @@ async def run_export(body: ExportIn, admin: dict = Depends(require_admin)):
                                                        include_gold=body.include_gold))
         except ValueError as e:
             raise HTTPException(422, str(e))
+
+
+# Annotator mode (docs/e13/ANNOTATOR.md); imported last because it reuses the models above
+from .api_annotator import router as annotator_router  # noqa: E402
+
+app.include_router(annotator_router)
