@@ -54,6 +54,10 @@ function renderItem(item) {
     L = {
         item,
         qid,
+        task: item.task_type || 'reasons',
+        clauses: [],         // clauses task (clauses.js)
+        activeClause: -1,
+        labelOverride: null,
         options: buildOptions(item.question),
         reasons: new Set(),
         answerable: false,
@@ -98,10 +102,12 @@ function renderItem(item) {
     document.getElementById('state-pane').scrollTop = 0;
 
     renderQuestion(item.question, qid);
-    document.getElementById('question-asof').textContent = item.asof ? `as of ${item.asof}` : '';
+    document.getElementById('question-asof').textContent =
+        item.asof && L.task !== 'clauses' ? `as of ${item.asof}` : '';
+    setupClauseView(item);  // clauses.js: shows or hides the clause task's panes
     renderReasons();
     renderSpans();
-    setRegion('state');
+    setRegion(L.task === 'clauses' ? 'hypothesis' : 'state');
 }
 
 function container(info) {
@@ -251,6 +257,7 @@ function paintTokens() {
         });
     };
     L.spans.forEach(s => mark(s, `role-${s.role}`));
+    if (isClauseTask()) paintClauses();
     if (L.selection) mark(L.selection, 'selected');
     const cur = regionTokens()[L.cursor];
     if (cur) cur.classList.add('cursor');
@@ -268,7 +275,8 @@ function setBanner(text) {
 
 function snapshot() {
     return JSON.stringify({ reasons: [...L.reasons], answerable: L.answerable, active: L.active,
-                            spans: L.spans, focusedSpan: L.focusedSpan });
+                            spans: L.spans, focusedSpan: L.focusedSpan,
+                            clauses: L.clauses, activeClause: L.activeClause, labelOverride: L.labelOverride });
 }
 
 function labelAction(fn) {
@@ -278,6 +286,7 @@ function labelAction(fn) {
     if (snapshot() !== before) L.history.push(before);
     renderReasons();
     renderSpans();
+    renderClauses();
 }
 
 function undo() {
@@ -288,8 +297,12 @@ function undo() {
     L.active = s.active;
     L.spans = s.spans;
     L.focusedSpan = s.focusedSpan;
+    L.clauses = s.clauses;
+    L.activeClause = s.activeClause;
+    L.labelOverride = s.labelOverride;
     renderReasons();
     renderSpans();
+    renderClauses();
 }
 
 function toggleReason(r) {
@@ -391,7 +404,8 @@ function handleMouseUp(e) {
     const target = e.target.closest ? e.target.closest('.tok') : null;
     if (!sel || sel.isCollapsed) {
         if (target) {
-            setRegion(target.closest('#options-view') ? 'options' : 'state');
+            setRegion(target.closest('#options-view') ? 'options'
+                : (target.closest('#hypothesis-view') ? 'hypothesis' : 'state'));
             L.cursor = regionTokens().indexOf(target);
             L.selection = null;
             paintTokens();
@@ -404,12 +418,14 @@ function handleMouseUp(e) {
     const startOffset = range.startContainer.nodeType === Node.TEXT_NODE ? range.startOffset : 0;
     const endOffset = range.endContainer.nodeType === Node.TEXT_NODE ? range.endOffset : b.textContent.length;
     L.selection = selectionFromRange(a, startOffset, b, endOffset, e.altKey);
+    if (L.selection) setRegion(L.selection.side === 'hypothesis' ? 'hypothesis'
+        : (L.selection.side === 'option' ? 'options' : 'state'));
     sel.removeAllRanges();
     paintTokens();
 }
 
 function regionTokens() {
-    const root = L && L.region === 'options' ? '#options-view' : '#state-view';
+    const root = { options: '#options-view', hypothesis: '#hypothesis-view' }[L && L.region] || '#state-view';
     return [...document.querySelectorAll(`${root} .tok.w`)];
 }
 
@@ -418,7 +434,7 @@ function setRegion(region) {
     L.cursor = -1;
     L.anchor = -1;
     document.getElementById('state-pane').classList.toggle('focused', region === 'state');
-    document.getElementById('question-pane').classList.toggle('focused', region === 'options');
+    document.getElementById('question-pane').classList.toggle('focused', region === 'options' || region === 'hypothesis');
 }
 
 function moveCursor(delta, extend) {
@@ -445,7 +461,7 @@ function moveCursor(delta, extend) {
 
 async function submitItem(override) {
     if (L.quiz && L.feedback) return nextQuizQuestion();  // onboarding.js
-    const body = {
+    const body = isClauseTask() ? clauseBody(override) : {
         item_id: L.item.item_id,
         answerable: L.answerable,
         reasons: orderedChecked(),
@@ -506,7 +522,7 @@ async function showHistory() {
     document.getElementById('history-list').innerHTML = rows.length ? rows.map(r => `
         <button class="history-row" ${r.editable ? '' : 'disabled'} onclick="editSubmission(${r.annotation_id})">
             <span>${escapeHtml(r.item_id)}</span>
-            <span>${r.answerable ? 'answerable' : escapeHtml(r.reasons.join(', '))}</span>
+            <span>${r.label ? escapeHtml(r.label) : (r.answerable ? 'answerable' : escapeHtml(r.reasons.join(', ')))}</span>
             <span class="question-type">v${r.version} · ${escapeHtml(r.created_at)}${r.editable ? '' : ' · batch closed'}</span>
         </button>`).join('') : '<p class="option-desc">Nothing to edit yet.</p>';
     document.getElementById('history-modal').classList.remove('hidden');
@@ -530,6 +546,7 @@ async function editSubmission(annotationId) {
     L.active = data.edit.reasons[0] || null;
     L.spans = data.edit.spans;
     document.getElementById('note').value = data.edit.note || '';
+    if (isClauseTask()) loadClauseEdit(data.edit);
     renderReasons();
     renderSpans();
     setBanner(`Editing your answer (version ${data.edit.version}). Enter saves version ${data.edit.version + 1}; Esc goes back.`);
@@ -568,6 +585,8 @@ function labelKeyDown(e) {
         }
         return true;
     }
+
+    if (isClauseTask() && clauseKeyDown(e)) return true;  // clauses.js
 
     const idx = REASON_KEYS.indexOf(k);
     if (idx >= 0 && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -674,6 +693,7 @@ function labelKeyDown(e) {
             }
             L.selection = null;
             L.anchor = -1;
+            L.cursor = -1;
             setBanner(null);
             paintTokens();
             break;

@@ -175,6 +175,18 @@ async def single_user_guard(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def revalidate_ui(request: Request, call_next):
+    """
+    The page and its scripts revalidate on every load (ETag/Last-Modified make
+    that a 304), so a browser never runs a new index.html with an old label.js.
+    """
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 CSRF_EXEMPT = {"/api/auth/login", "/api/auth/register", "/api/auth/reset"}
 
 
