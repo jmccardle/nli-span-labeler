@@ -126,6 +126,7 @@
             <h1>E13 Labeler</h1>
             <div class="nav-tabs header-tabs">
                 <button class="nav-tab active" data-tab="label" onclick="switchTab('label')">Label</button>
+                <button class="nav-tab" data-tab="dataset" onclick="switchTab('dataset')">Dataset</button>
                 <button class="nav-tab admin-only hidden" data-tab="admin" onclick="switchTab('admin')">Admin</button>
             </div>
             <div class="header-buttons">
@@ -194,6 +195,48 @@
                 </div>
             </div>
 
+            <!-- Annotator mode (docs/e13/ANNOTATOR.md): shown for items opened from the Dataset tab -->
+            <div id="annot-panel" class="annot-panel hidden">
+                <div class="annot-bar">
+                    <button class="btn btn-small" onclick="annotStep(-1)" title="Previous item (,)">‹ prev</button>
+                    <span id="annot-where" class="question-type"></span>
+                    <button class="btn btn-small" onclick="annotStep(1)" title="Next item (.)">next ›</button>
+                    <button class="btn btn-small" onclick="switchTab('dataset')">list</button>
+                    <span class="annot-spacer"></span>
+                    <button id="annot-record" class="btn btn-record" onclick="toggleRecording()" title="Record (v)">● record</button>
+                    <span id="annot-rec-state" class="question-type"></span>
+                    <label class="annot-toggle"><input type="checkbox" id="annot-show-nodes" checked
+                           onchange="paintNodeNumbers()"> numbers</label>
+                </div>
+                <div class="annot-grid">
+                    <div class="pane">
+                        <div class="pane-title"><span>Trees</span><span>click: phrase · Shift-click: word</span></div>
+                        <div id="annot-trees" class="annot-trees"></div>
+                    </div>
+                    <div class="pane">
+                        <div class="pane-title"><span>Proposal</span><span id="annot-proposal-state"></span></div>
+                        <div id="annot-proposal"></div>
+                        <div class="pane-title" style="margin-top: 10px;"><span>Said</span><span id="annot-queue"></span></div>
+                        <div id="annot-utterances" class="annot-list"></div>
+                        <div class="annot-type">
+                            <textarea id="annot-text" class="note-textarea" rows="2" maxlength="20000"
+                                      placeholder="Or type what you'd say: “13 is supported by 2. 16 is undetermined; 5 suggests it.” (Ctrl+Enter sends)"></textarea>
+                        </div>
+                    </div>
+                    <div class="pane">
+                        <div class="pane-title"><span>Notes</span><span id="annot-versions"></span></div>
+                        <div id="annot-notes" class="annot-list"></div>
+                        <div class="annot-note-add">
+                            <select id="annot-note-cat">
+                                <option>relation</option><option>grammar</option><option>pos</option>
+                                <option>lexical</option><option>label</option><option>procedure</option><option>other</option>
+                            </select>
+                            <input id="annot-note-text" type="text" maxlength="4000" placeholder="Add a note (Enter)">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div id="label-footer" class="card hidden" style="margin-top: 12px; padding: 12px 16px;">
                 <div id="span-block">
                     <div class="pane-title"><span>Spans</span><span>Del removes the focused span</span></div>
@@ -217,6 +260,24 @@
                     <kbd>f</kbd> flag · <kbd>e</kbd> edit earlier · <kbd>s</kbd>/<kbd>r</kbd>/<kbd>u</kbd>/<kbd>m</kbd> span role · <kbd>Alt</kbd>-drag char-precise ·
                     <kbd>?</kbd> help
                 </div>
+            </div>
+        </div>
+
+        <div id="dataset-tab" class="tab-content hidden">
+            <div class="card">
+                <div class="labels-header">
+                    <h2>Dataset</h2>
+                    <select id="dataset-batch" onchange="loadDatasetItems()"></select>
+                    <select id="dataset-filter" onchange="renderDatasetItems()">
+                        <option value="">all items</option>
+                        <option value="todo">unlabelled</option>
+                        <option value="review">proposal to review</option>
+                        <option value="busy">jobs pending</option>
+                        <option value="hard">hard (flips or hedges)</option>
+                    </select>
+                    <span id="dataset-summary" class="question-type"></span>
+                </div>
+                <div id="dataset-items"></div>
             </div>
         </div>
 
@@ -286,6 +347,7 @@
     <script src="/static/app.js"></script>
     <script src="/static/label.js"></script>
     <script src="/static/clauses.js"></script>
+    <script src="/static/annotator.js"></script>
     <script src="/static/onboarding.js"></script>
     <script src="/static/adjudicate.js"></script>
 </body>

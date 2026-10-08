@@ -1,7 +1,8 @@
 # Annotator mode: a curated dataset annotated by speaking, with an offline agent scribe
 
-**Status:** spec and phase 1 build on branch `e13/annotator` (2026-10-08). The owner set the direction in conversation
-on 2026-10-08. It builds on the clauses task (`CLAUSE_TASK.md`) and keeps it as the label core.
+**Status:** phase 1 is built on branch `e13/annotator` (2026-10-08). The owner set the direction in conversation on
+2026-10-08. It builds on the clauses task (`CLAUSE_TASK.md`) and keeps it as the label core. Running it is covered in
+§12.
 
 ## 1. Why
 
@@ -142,6 +143,9 @@ riding something other than a motorcycle".
   al. 2020).
 - **Caution:** treat variations as single-author until someone relabels a sample blind. On `e17c-esnli-50`, the
   caption writers' own labels matched the SNLI majority on only 45 of 50 items.
+- **Checking "now neutral" variations:** these need a stricter check than E17's neutral certificate, which passed 23
+  of 34 false neutrals. Contradicted clauses are also where E17's probe was weakest (0.48 agreement with the owner's
+  stances).
 
 ## 9. Post-processing (phase 4), and the experiment this enables
 
@@ -166,6 +170,10 @@ riding something other than a motorcycle".
 - **Experiment:** an E16-style curve comparing plain labels at k with deep annotations at k/5 (clauses, notes and about
   5 variations per item), first on NLI and then on an event-log escalation task. The result is how many hours of
   discussion an end-user question costs.
+  - **Equal human time:** compare at equal human time, not equal item counts. The history export carries active
+    time, audio duration and versions per item for this.
+  - **Its own split:** an NLI-only comparison needs its own k-curve on one fixed split with 3 seeds. E16's k=500 points
+    are per held-out task (`build_tasks.py`), so they can't be reused directly.
 
 ## 10. Data model (schema V10)
 
@@ -179,8 +187,8 @@ riding something other than a motorcycle".
 | `notes` | `item_id`, `labeler_id`, `annotation_id`, `target_json` (nodes, clause, relation), `category`, `text`, `hedge`, `source` (`agent` / `typed`), `utterance_id`, `proposal_id`, `retracted_at` |
 | `relations` | `annotation_id`, `from_json` / `to_json` (node ranges and offsets), `type`, `note` |
 
-Audio files live under `E13_OUTPUTS/audio/<item>/<utterance>.webm`. The no-delete triggers cover all of the new
-tables.
+Audio files live under `E13_OUTPUTS/audio/<item>/<utterance>.webm`. The no-delete triggers cover every new table
+except `jobs`, which is a work queue; what each job produced lives in the utterances and proposals it wrote.
 
 ## 11. Phases
 
@@ -190,3 +198,42 @@ tables.
 | 2 | JSON and code trees; live job view polish; agent prompt tuning on real recordings | runs engines |
 | 3 | variations authoring | runs engines |
 | 4 | history and note mining, template generation, the k vs deep-k experiment | yes |
+
+## 12. Running it (phase 1)
+
+**Make a batch curated** (clauses batches only):
+
+```
+python -m e13_labeler batch config NAME --mode curated
+```
+
+Curated batches leave the served queue and appear in the **Dataset** tab.
+
+**In the browser:**
+1. Open the Dataset tab, pick a batch and click an item. The item opens in the label screen, with the annotator panel
+   below it.
+2. Words carry node numbers, and the trees list each node with its POS tag and dependency label. Click a tree line to
+   select that node's phrase; Shift-click selects the word.
+3. Press `v` to record and `v` again to stop, or type into the box and press Ctrl+Enter. Either way the recording is
+   saved at once, and transcription and the agent run later.
+4. A proposal appears when the queue gets to it. `y` (or **accept**) saves it as the next version. **Edit first** loads
+   it into the editor, and Enter then accepts the edited version. **Reject** keeps it, marked rejected.
+5. Edit with the clause keys at any time; Enter saves a new version. `,` and `.` move to the previous or next item.
+
+**The worker** runs separately and can wait for engines:
+
+```
+E13_STT_URL=http://127.0.0.1:4998/v1/audio/transcriptions \
+E13_AGENT_URL=http://127.0.0.1:8870/v1 E13_AGENT_MODEL=agent \
+python -m e13_labeler worker
+```
+
+- **Transcription:** `~/audio_server/localoai_transcription.py` (whisper-turbo, port 4998) speaks the transcription
+  API as is.
+- **Agent:** `llama-server -m <gguf> --alias agent --port 8870` works, with Qwen3.6-27B (used in E17) or a smaller
+  model.
+- **When an engine is down:** its jobs show `waiting` with the reason, and are retried every 30 s.
+
+**Tests** (fake engines, no model runs):
+- `tests/test_annotator.py`;
+- `tests/e2e/run_annotator_browser.sh`, 19 Chromium checks with a fake microphone.

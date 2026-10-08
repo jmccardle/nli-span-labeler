@@ -1144,3 +1144,52 @@ pre.json-block { white-space: pre-wrap; font-size: 0.8rem; color: var(--text-sec
 @media (max-width: 900px) { .adj-grid { grid-template-columns: 1fr; } }
 
 .import-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; font-size: 0.85rem; }
+
+/* Annotator mode (docs/e13/ANNOTATOR.md) */
+.show-nodes .tok[data-n]::after {
+    content: attr(data-n); font-size: 0.62em; vertical-align: super; margin-left: 1px;
+    color: var(--text-secondary); font-family: ui-monospace, monospace; user-select: none;
+}
+.annot-panel { margin-top: 12px; }
+.annot-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; font-size: 0.85rem; }
+.annot-spacer { flex: 1; }
+.annot-toggle { font-size: 0.8rem; color: var(--text-secondary); display: flex; gap: 4px; align-items: center; }
+.btn-record { background: #3a1e24; color: #f87171; border: 1px solid #f87171; padding: 4px 12px; font-size: 0.85rem; }
+.btn-record.recording { background: #f87171; color: #1a1a2e; animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: 0.6; } }
+.annot-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px; }
+.annot-grid .pane { padding: 10px 12px; max-height: 420px; overflow-y: auto; font-size: 0.85rem; }
+.annot-trees { font-family: ui-monospace, monospace; font-size: 0.8rem; line-height: 1.55; }
+.tree-side { color: var(--text-secondary); text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.06em; margin: 6px 0 2px; }
+.tree-node { cursor: pointer; border-radius: 4px; white-space: nowrap; }
+.tree-node:hover { background: rgba(74, 158, 255, 0.15); }
+.node-n { color: var(--accent); display: inline-block; min-width: 1.8em; text-align: right; }
+.node-pos { color: var(--text-secondary); font-size: 0.75rem; font-family: ui-monospace, monospace; }
+.annot-list { display: flex; flex-direction: column; gap: 6px; }
+.utt { border-left: 2px solid #444; padding-left: 8px; }
+.utt audio { height: 26px; width: 100%; margin: 2px 0; }
+.utt-meta { color: var(--text-secondary); font-size: 0.75rem; }
+.job { padding: 0 5px; border-radius: 4px; font-size: 0.7rem; border: 1px solid #555; }
+.job-done { color: var(--success); border-color: var(--success); }
+.job-waiting, .job-queued, .job-running { color: var(--warning); border-color: var(--warning); }
+.job-failed { color: var(--danger); border-color: var(--danger); }
+.annot-type { margin-top: 8px; }
+.annot-type textarea { min-height: 0; }
+.annot-note-add { display: flex; gap: 6px; margin-top: 8px; }
+.annot-note-add input, .annot-note-add select {
+    background: #1a1a2e; border: 1px solid #444; border-radius: 6px; color: var(--text-primary); padding: 4px 8px; }
+.annot-note-add input { flex: 1; }
+.note-row { line-height: 1.45; }
+.note-cat { font-size: 0.7rem; padding: 0 5px; border-radius: 4px; border: 1px solid #555; color: var(--text-secondary); margin-right: 4px; }
+.proposal-label { margin-bottom: 4px; }
+.proposal-sub { color: var(--text-secondary); font-size: 0.7rem; text-transform: uppercase; margin-top: 6px; }
+.proposal-q { color: var(--accent); margin-top: 4px; }
+.proposal-problem { color: var(--danger); margin-top: 2px; font-size: 0.8rem; }
+.proposal-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.badge-review { color: #1a1a2e; background: var(--accent); border-radius: 4px; padding: 0 5px; font-size: 0.75rem; }
+.badge-busy { color: var(--warning); }
+.badge-warn { color: var(--danger); }
+.dataset-table td { vertical-align: top; font-size: 0.85rem; }
+.dataset-row { cursor: pointer; }
+.dataset-row:hover td { background: rgba(74, 158, 255, 0.08); }
+@media (max-width: 1100px) { .annot-grid { grid-template-columns: 1fr; } }

@@ -108,6 +108,7 @@ function renderItem(item) {
     renderReasons();
     renderSpans();
     setRegion(L.task === 'clauses' ? 'hypothesis' : 'state');
+    if (typeof setupAnnotatorView === 'function') setupAnnotatorView(item);  // annotator.js
 }
 
 function container(info) {
@@ -472,6 +473,7 @@ async function submitItem(override) {
         active_ms: Math.round(L.timer.active),
     };
     if (L.quiz) return submitQuizAnswer(body);  // onboarding.js
+    if (L.annot) return annotatorSubmit(body, override);  // annotator.js (Dataset view)
     const resp = L.edit
         ? await authenticatedFetch(`/api/annotations/${L.edit.annotation_id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -586,6 +588,7 @@ function labelKeyDown(e) {
         return true;
     }
 
+    if (L.annot && annotKeyDown(e)) return true;          // annotator.js
     if (isClauseTask() && clauseKeyDown(e)) return true;  // clauses.js
 
     const idx = REASON_KEYS.indexOf(k);

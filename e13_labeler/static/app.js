@@ -325,13 +325,16 @@ function showMessage(text, type) {
     setTimeout(() => { area.innerHTML = ''; }, 3000);
 }
 
-function switchTab(tabName) {
+// keepItem: the Dataset tab opens an item in the label screen; clicking "Label"
+// itself leaves annotator mode for the served queue.
+function switchTab(tabName, keepItem = false) {
     document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
     document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
     document.getElementById(`${tabName}-tab`).classList.remove('hidden');
     document.querySelector(`.nav-tab[data-tab="${tabName}"]`).classList.add('active');
     if (tabName === 'admin') loadAdmin();
-    if (tabName === 'label' && typeof loadNextItem === 'function' && !L) loadNextItem();
+    if (tabName === 'dataset' && typeof loadDatasetBatches === 'function') loadDatasetBatches();
+    if (tabName === 'label' && typeof loadNextItem === 'function' && !keepItem && (!L || L.annot)) loadNextItem();
 }
 
 function isAdmin() {
