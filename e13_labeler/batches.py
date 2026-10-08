@@ -34,15 +34,50 @@ def get_batch(conn: sqlite3.Connection, name: str) -> sqlite3.Row:
     return batch
 
 
-def ensure_batch(conn: sqlite3.Connection, name: str) -> int:
-    row = conn.execute("SELECT id FROM batches WHERE name = ?", (name,)).fetchone()
+TASK_TYPES = ("reasons", "clauses")   # the ones the app labels; relation (FR-23) is not built
+
+
+def ensure_batch(conn: sqlite3.Connection, name: str, task_type: Optional[str] = None) -> int:
+    """
+    The batch's id, creating it as a draft if new. ``task_type`` (default
+    reasons) must match an existing batch's. A clauses batch asks no abstain
+    reasons (docs/e13/CLAUSE_TASK.md).
+    """
+    row = conn.execute("SELECT id, task_type FROM batches WHERE name = ?", (name,)).fetchone()
     if row:
+        if task_type is not None and row["task_type"] != task_type:
+            raise ValueError(f"batch {name!r} is a {row['task_type']} batch, not {task_type}")
         return row["id"]
+    task_type = task_type or "reasons"
+    if task_type not in TASK_TYPES:
+        raise ValueError(f"task type must be one of {', '.join(TASK_TYPES)}")
+    reasons, policy = (list(REASONS), DEFAULT_SPAN_POLICY) if task_type == "reasons" else ([], {})
     cur = conn.execute(
-        "INSERT INTO batches (name, reason_set_json, span_policy_json) VALUES (?, ?, ?)",
-        (name, json.dumps(list(REASONS)), json.dumps(DEFAULT_SPAN_POLICY)),
+        "INSERT INTO batches (name, task_type, reason_set_json, span_policy_json) VALUES (?, ?, ?, ?)",
+        (name, task_type, json.dumps(reasons), json.dumps(policy)),
     )
     return cur.lastrowid
+
+
+def set_reasons(conn: sqlite3.Connection, name: str, reasons: list, actor_id=None, force: bool = False) -> dict:
+    """
+    Narrow (or change) a reasons batch's reason set. Existing annotations keep
+    their reasons_json; a reason outside the new set counts as "not asked" for
+    new labels only (agreement already treats null as missing).
+    """
+    batch = get_batch(conn, name)
+    if batch["task_type"] != "reasons":
+        raise ValueError(f"batch {name!r} is a {batch['task_type']} batch; it has no reason set")
+    unknown = [r for r in reasons if r not in REASONS]
+    if unknown or not reasons:
+        raise ValueError(f"reasons must be a non-empty subset of {', '.join(REASONS)}")
+    reasons = [r for r in REASONS if r in reasons]   # canonical order (keys 1-0 follow it)
+    if batch["status"] == "open" and not force:
+        raise ValueError(f"batch {name!r} is open; close it first or pass --force")
+    old = json.loads(batch["reason_set_json"])
+    conn.execute("UPDATE batches SET reason_set_json = ? WHERE id = ?", (json.dumps(reasons), batch["id"]))
+    audit(conn, actor_id, "batch_reasons", name, {"from": old, "to": reasons})
+    return {"name": name, "reason_set": reasons, "was": old}
 
 
 def in_reliability_subset(batch_name: str, item_id: str, fraction: float) -> bool:

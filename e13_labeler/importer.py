@@ -80,6 +80,9 @@ def validate_question(qid: str, question) -> dict:
         raise RowError(f"score question {qid!r} needs a non-empty criteria list")
     if qtype == "noul" and criteria is not None and not isinstance(criteria, dict):
         raise RowError(f"noul question {qid!r}: criteria must be an object of true/false descriptions")
+    hypothesis = question.get("hypothesis")
+    if hypothesis is not None and not (isinstance(hypothesis, str) and hypothesis.strip()):
+        raise RowError(f"question {qid!r}: hypothesis must be a non-empty string")
     return question
 
 
@@ -225,18 +228,23 @@ def import_rows(
     actor_id: Optional[int] = None,
     actor: str = "cli",
     source_permissions: Optional[dict] = None,
+    task_type: Optional[str] = None,
 ) -> ImportReport:
     """
     Import JSONL lines in one transaction. Rejected rows are reported and skipped;
     the rest are imported. ``replace`` lets a changed state overwrite an item;
     ``allow_lower_tier`` (owner only) lets that replacement lower its tier (FR-56).
+    ``task_type`` creates a new ``batch`` of that type (or must match an existing
+    one); a clauses batch takes only items whose question has a hypothesis.
     """
     report = ImportReport(file=file_label)
+    batch_id = ensure_batch(conn, batch, task_type) if batch else None
+    clause_batch = bool(batch_id) and conn.execute(
+        "SELECT task_type FROM batches WHERE id = ?", (batch_id,)).fetchone()[0] == "clauses"
     cur = conn.execute(
         "INSERT INTO import_runs (file, sha256, actor) VALUES (?, ?, ?)", (file_label, file_sha256, actor)
     )
     report.import_run_id = run_id = cur.lastrowid
-    batch_id = ensure_batch(conn, batch) if batch else None
 
     for lineno, line in enumerate(lines, start=1):
         if not line.strip():
@@ -246,6 +254,8 @@ def import_rows(
             items = parse_row(json.loads(line), source_permissions)
             pending = []
             for item in items:
+                if clause_batch and not isinstance(item.question.get("hypothesis"), str):
+                    raise RowError(f"{item.item_id}: a clauses batch needs question.hypothesis")
                 existing = conn.execute(
                     "SELECT state_sha256, permissions, visibility FROM items WHERE item_id = ?", (item.item_id,)
                 ).fetchone()

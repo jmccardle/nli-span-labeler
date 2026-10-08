@@ -393,7 +393,81 @@ SCHEMA_V8 = """
 ALTER TABLE spans ADD COLUMN renderer TEXT;
 """
 
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8]
+# V9 (2026-10-08): the `clauses` task (docs/e13/CLAUSE_TASK.md). A labeler splits
+# the hypothesis into clauses, gives each a stance and links the premise words
+# behind it; the sentence label is derived. Clauses and their evidence get their
+# own tables, so reasons-task spans are untouched. batches is rebuilt for the
+# task_type CHECK (SQLite can't change a CHECK in place).
+CLAUSE_STANCES = ("supported", "contradicted", "undetermined", "unaddressed")
+NLI_LABELS = ("entailment", "neutral", "contradiction")
+
+SCHEMA_V9 = f"""
+CREATE TABLE batches_v9 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    task_type TEXT NOT NULL DEFAULT 'reasons'
+        CHECK (task_type IN ('reasons', 'reasons+relation', 'relation', 'clauses')),
+    reason_set_json TEXT NOT NULL,
+    overlap_target INTEGER NOT NULL DEFAULT 3 CHECK (overlap_target >= 1),
+    reliability_fraction REAL NOT NULL DEFAULT 0
+        CHECK (reliability_fraction >= 0 AND reliability_fraction <= 1),
+    reliability_overlap INTEGER NOT NULL DEFAULT 3 CHECK (reliability_overlap >= 2),
+    relabel_of INTEGER REFERENCES batches(id),
+    relabel_after_days INTEGER NOT NULL DEFAULT 7 CHECK (relabel_after_days >= 0),
+    tier_ceiling TEXT NOT NULL DEFAULT 'jev+restricted',
+    span_policy_json TEXT NOT NULL DEFAULT '{{}}',
+    show_model_answer TEXT,
+    priority INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'open', 'closed')),
+    guideline_version TEXT,
+    require_note INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO batches_v9 (id, name, task_type, reason_set_json, overlap_target, reliability_fraction,
+                        reliability_overlap, relabel_of, relabel_after_days, tier_ceiling, span_policy_json,
+                        show_model_answer, priority, status, guideline_version, require_note, created_at)
+    SELECT id, name, task_type, reason_set_json, overlap_target, reliability_fraction,
+           reliability_overlap, relabel_of, relabel_after_days, tier_ceiling, span_policy_json,
+           show_model_answer, priority, status, guideline_version, require_note, created_at FROM batches;
+DROP TABLE batches;
+ALTER TABLE batches_v9 RENAME TO batches;
+
+-- label: the final sentence label (label_derived, or the labeler's override);
+-- completion_json: {{"entail": ..., "contradict": ...}} sentences for neutral items
+ALTER TABLE annotations ADD COLUMN label TEXT CHECK (label IS NULL OR label IN {NLI_LABELS});
+ALTER TABLE annotations ADD COLUMN label_derived TEXT CHECK (label_derived IS NULL OR label_derived IN {NLI_LABELS});
+ALTER TABLE annotations ADD COLUMN completion_json TEXT;
+
+CREATE TABLE clauses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    annotation_id INTEGER NOT NULL REFERENCES annotations(id),
+    idx INTEGER NOT NULL,
+    start INTEGER NOT NULL,          -- offsets into the hypothesis (code points)
+    "end" INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    stance TEXT NOT NULL CHECK (stance IN {CLAUSE_STANCES}),
+    omission INTEGER NOT NULL DEFAULT 0,   -- contradicted by what the premise leaves out
+    note TEXT,
+    UNIQUE (annotation_id, idx)
+);
+CREATE INDEX idx_clauses_annotation ON clauses(annotation_id);
+
+CREATE TABLE clause_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    clause_id INTEGER NOT NULL REFERENCES clauses(id),
+    start INTEGER NOT NULL,          -- offsets into the state's canonical rendering (rule 7)
+    "end" INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    renderer TEXT NOT NULL
+);
+CREATE INDEX idx_clause_evidence_clause ON clause_evidence(clause_id);
+""" + "".join(
+    f"CREATE TRIGGER no_delete_{t} BEFORE DELETE ON {t} BEGIN "
+    f"SELECT RAISE(ABORT, 'no hard deletes (NFR-6): retire, revoke or version instead'); END;\n"
+    for t in ("clauses", "clause_evidence")
+)
+
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9]
 
 
 def connect() -> sqlite3.Connection:

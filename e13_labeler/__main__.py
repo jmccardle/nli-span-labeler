@@ -3,8 +3,9 @@ Command-line entry point.
 
     python -m e13_labeler init-db
     python -m e13_labeler create-owner [--login NAME]
-    python -m e13_labeler import FILE [--batch NAME] [--replace] [--allow-lower-tier]
-    python -m e13_labeler batch {list | open|close|draft NAME | config NAME ... | relabel NAME NEW ...}
+    python -m e13_labeler import FILE [--batch NAME [--task reasons|clauses]] [--replace] [--allow-lower-tier]
+    python -m e13_labeler batch {list | open|close|draft NAME | config NAME ... | set-reasons NAME r1,r2 [--force]
+                                 | relabel NAME NEW ...}
     python -m e13_labeler import-labels FILE                       # model pseudo-labelers (FR-9)
     python -m e13_labeler export [--kind ...] [--batch ...] [--permissions ...] [--no-text] ...
     python -m e13_labeler agreement [--batch ...]
@@ -67,8 +68,12 @@ def cmd_import(args) -> int:
 
     init_db()
     with get_db() as conn:
-        report = import_file(conn, args.file, batch=args.batch, replace=args.replace,
-                             allow_lower_tier=args.allow_lower_tier)
+        try:
+            report = import_file(conn, args.file, batch=args.batch, replace=args.replace,
+                                 allow_lower_tier=args.allow_lower_tier, task_type=args.task)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
     for lineno, message in report.errors:
         print(f"{args.file}:{lineno}: rejected: {message}", file=sys.stderr)
     summary = {k: v for k, v in report.as_dict().items() if k != "errors"}
@@ -103,6 +108,10 @@ def cmd_batch(args) -> int:
                     tier_ceiling=args.tier_ceiling, require_note=args.require_note,
                     relabel_after_days=args.after_days)
                 print(json.dumps(result))
+            elif args.action == "set-reasons":
+                result = batches.set_reasons(conn, args.name, [r.strip() for r in args.reasons.split(",") if r.strip()],
+                                             force=args.force)
+                print(json.dumps(result))
             elif args.action == "relabel":
                 result = batches.create_relabel(conn, args.name, args.new_name, fraction=args.fraction,
                                                 after_days=args.after_days if args.after_days is not None else 7)
@@ -127,7 +136,7 @@ def cmd_export(args) -> int:
     init_db()
     try:
         with get_db() as conn:
-            manifest = write_export(conn, kinds=args.kind or ("annotations", "training", "agreement", "items"),
+            manifest = write_export(conn, kinds=args.kind or None,
                                     filters=_filters(args), out_root=args.out, text_included=not args.no_text,
                                     n_boot=args.n_boot, seed=args.seed)
     except ValueError as e:
@@ -340,6 +349,8 @@ def main(argv=None) -> int:
     p.add_argument("--replace", action="store_true", help="overwrite items whose state changed")
     p.add_argument("--allow-lower-tier", action="store_true",
                    help="owner only: let a replacement lower an item's permissions tier (logged)")
+    p.add_argument("--task", choices=("reasons", "clauses"),
+                   help="task type of a new --batch (default reasons); must match an existing batch")
     p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("batch", help="list, open/close, configure or re-label batches")
@@ -356,6 +367,10 @@ def main(argv=None) -> int:
     c.add_argument("--tier-ceiling")
     c.add_argument("--require-note", action=argparse.BooleanOptionalAction, default=None)
     c.add_argument("--after-days", type=int, help="re-label batches: minimum gap in days")
+    s = bsub.add_parser("set-reasons", help="narrow a reasons batch's reason set (comma-separated)")
+    s.add_argument("name")
+    s.add_argument("reasons", help="e.g. not_enough_info,conflicting_evidence")
+    s.add_argument("--force", action="store_true", help="allow while the batch is open")
     r = bsub.add_parser("relabel", help="create an intra-rater re-label batch over a batch")
     r.add_argument("name", help="source batch")
     r.add_argument("new_name", help="name of the re-label batch")
@@ -374,7 +389,7 @@ def main(argv=None) -> int:
         p.add_argument("--seed", type=int, default=0)
 
     p = sub.add_parser("export", help="write annotation / training / agreement / items exports (FR-45..49)")
-    p.add_argument("--kind", action="append", choices=["annotations", "training", "agreement", "items"],
+    p.add_argument("--kind", action="append", choices=["annotations", "training", "agreement", "items", "clauses"],
                    help="what to write (repeatable; default all)")
     p.add_argument("--no-text", action="store_true", help="training rows without state/question text (§5.5)")
     p.add_argument("--out", help="export root (default outputs/e13_labeler/exports)")

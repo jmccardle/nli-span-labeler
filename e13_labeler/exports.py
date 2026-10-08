@@ -9,6 +9,7 @@ anything (owner policy: keep all artifacts). It can contain:
 - ``training.jsonl``: one row per item with enough human labels (FR-46, §5.5)
 - ``agreement.json``: every agreement number plus the records behind them (FR-48)
 - ``items.jsonl``: the items in the E09 pool import format, so the data round-trips (FR-5)
+- ``clauses.jsonl``: clauses-batch labels, one row per (item, labeler, batch) (docs/e13/CLAUSE_TASK.md)
 - ``manifest.json``: app version, guideline versions, DB checksum, filters, files (FR-49)
 """
 
@@ -28,7 +29,7 @@ from .records import Filters, item_filter_sql, load_annotations, public
 
 TRAIN_SCHEMA = "e13.train/1"
 MANIFEST_SCHEMA = "e13.export-manifest/1"
-KINDS = ("annotations", "training", "agreement", "items")
+KINDS = ("annotations", "training", "agreement", "items", "clauses")
 
 
 def _dumps(obj) -> str:
@@ -120,7 +121,7 @@ def training_rows(conn: sqlite3.Connection, filters: Filters, text_included: boo
     records = [r for r in load_annotations(conn, Filters(**{**filters.__dict__, "include_models": False,
                                                             "include_skipped": False}))
                if r["labeler_kind"] == "human" and r["_relabel_of"] is None and r["_blind"]
-               and not r["_gold_probe"] and r["skipped"] is None]
+               and not r["_gold_probe"] and r["skipped"] is None and r["task"] != "clauses"]
     by_item: dict = {}
     for r in records:
         by_item.setdefault(r["item_id"], []).append(r)
@@ -203,6 +204,75 @@ def training_rows(conn: sqlite3.Connection, filters: Filters, text_included: boo
 
 
 # ============================================================================
+# Clauses (docs/e13/CLAUSE_TASK.md)
+# ============================================================================
+
+CLAUSES_SCHEMA = "e13.clauses/1"
+
+
+def _clause_texts(conn: sqlite3.Connection, item_ids) -> dict:
+    """item_id -> (hypothesis, rendered premise, item row)."""
+    from .clauses import hypothesis_of
+
+    out = {}
+    for item_id in sorted(set(item_ids)):
+        it = conn.execute("SELECT * FROM items WHERE item_id = ?", (item_id,)).fetchone()
+        out[item_id] = (hypothesis_of(json.loads(it["question_json"])) or "",
+                        render_state(it["state"], it["state_format"]).text, it)
+    return out
+
+
+def clause_rows(conn: sqlite3.Connection, filters: Filters, text_included: bool = True) -> list[dict]:
+    """
+    One row per (item, labeler, batch) of a clauses batch, latest version, not
+    skipped. Offsets index the hypothesis and the premise's canonical rendering
+    (rule 7); ``words`` are indices into ``text.split()`` (the E17 harness's
+    word indexing), derived here and never stored.
+    """
+    from .clauses import hypothesis_word_evidence, hypothesis_word_tags, word_indices
+
+    records = [r for r in load_annotations(conn, Filters(**{**filters.__dict__, "include_skipped": False}))
+               if r["task"] == "clauses" and r["label"]]
+    texts = _clause_texts(conn, [r["item_id"] for r in records])
+    rows = []
+    for r in records:
+        hypothesis, premise, item = texts[r["item_id"]]
+        clauses = [{**c, "words": word_indices(hypothesis, c["start"], c["end"]),
+                    "evidence": [{**e, "words": word_indices(premise, e["start"], e["end"])} for e in c["evidence"]]}
+                   for c in r["clauses"]]
+        row = {
+            "schema": CLAUSES_SCHEMA,
+            "id": item["row_id"], "qid": item["qid"], "item_id": r["item_id"], "source": item["source"],
+            "split": item["split"], "permissions": item["permissions"], "state_sha256": item["state_sha256"],
+            "batch": r["batch"], "relabel_of": r["_relabel_of"], "labeler": r["labeler"],
+            "labeler_kind": r["labeler_kind"], "version": r["version"], "gold_probe": r["_gold_probe"],
+            "label": r["label"], "label_derived": r["label_derived"],
+            "label_override": r["label"] != r["label_derived"],
+            "clauses": clauses,
+            "hypothesis_word_tags": hypothesis_word_tags(hypothesis, r["clauses"]),
+            "hypothesis_word_evidence": hypothesis_word_evidence(hypothesis, premise, r["clauses"]),
+            "completion": r["completion"], "note": r["note"], "policy_override": r["policy_override"],
+            "timing": r["timing"], "created_at": r["created_at"],
+        }
+        if text_included:
+            row["premise"] = premise
+            row["hypothesis"] = hypothesis
+        rows.append(row)
+    return rows
+
+
+def clause_agreement_document(conn: sqlite3.Connection, filters: Filters, n_boot: int = 1000,
+                              seed: int = 0) -> Optional[dict]:
+    from .clauses_agreement import clause_agreement
+
+    records = [r for r in load_annotations(conn, filters) if r["task"] == "clauses"]
+    if not records:
+        return None
+    texts = {k: v[:2] for k, v in _clause_texts(conn, [r["item_id"] for r in records]).items()}
+    return clause_agreement(records, texts, n_boot=n_boot, seed=seed)
+
+
+# ============================================================================
 # FR-5 items (pool import format)
 # ============================================================================
 
@@ -261,6 +331,9 @@ def agreement_document(conn: sqlite3.Connection, filters: Filters, n_boot: int =
     data = agreement_inputs(conn, filters)
     doc = report(data, n_boot=n_boot, seed=seed)
     doc["filters"] = filters.as_dict()
+    clauses = clause_agreement_document(conn, filters, n_boot=n_boot, seed=seed)
+    if clauses is not None:
+        doc["clauses"] = clauses  # from the clauses export's rows, not from doc["data"]
     # The exact inputs, so `analysis.report(doc["data"], n_boot=..., seed=...)` reproduces every number
     doc["data"] = data
     return doc
@@ -303,10 +376,17 @@ def _sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def write_export(conn: sqlite3.Connection, kinds: Sequence[str] = KINDS, filters: Filters = Filters(),
+def default_kinds(conn: sqlite3.Connection) -> tuple:
+    """Every kind; clauses only when a clauses batch exists."""
+    has_clauses = conn.execute("SELECT 1 FROM batches WHERE task_type = 'clauses' LIMIT 1").fetchone()
+    return tuple(k for k in KINDS if k != "clauses" or has_clauses)
+
+
+def write_export(conn: sqlite3.Connection, kinds: Optional[Sequence[str]] = None, filters: Filters = Filters(),
                  out_root: Optional[Path] = None, text_included: bool = True, actor_id=None,
                  n_boot: int = 1000, seed: int = 0) -> dict:
-    """Write the requested exports into a fresh timestamped directory. Returns the manifest."""
+    """Write the requested exports (default: default_kinds) into a fresh timestamped directory. Returns the manifest."""
+    kinds = default_kinds(conn) if kinds is None else kinds
     unknown = set(kinds) - set(KINDS)
     if unknown:
         raise ValueError(f"unknown export kind(s): {', '.join(sorted(unknown))}")
@@ -319,6 +399,8 @@ def write_export(conn: sqlite3.Connection, kinds: Sequence[str] = KINDS, filters
     if "training" in kinds:
         files.append(("training.jsonl", _write_jsonl(out / "training.jsonl",
                                                      training_rows(conn, filters, text_included))))
+    if "clauses" in kinds:
+        files.append(("clauses.jsonl", _write_jsonl(out / "clauses.jsonl", clause_rows(conn, filters, text_included))))
     if "items" in kinds:
         if not text_included:
             raise ValueError("the items export carries state text; it can't be written with text_included off")

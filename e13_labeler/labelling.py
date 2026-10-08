@@ -16,7 +16,7 @@ NOTE_MAX_CHARS = 2000
 
 # Only these question keys reach the labeler (FR-12). Anything else the importer
 # kept (gold, generator targets, ...) lives in other columns.
-QUESTION_KEYS = ("type", "instructions", "criteria")
+QUESTION_KEYS = ("type", "instructions", "criteria", "hypothesis")
 
 
 class SubmissionError(ValueError):

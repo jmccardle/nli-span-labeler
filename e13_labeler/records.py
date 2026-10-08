@@ -70,7 +70,8 @@ def load_annotations(conn: sqlite3.Connection, filters: Filters = Filters()) -> 
     item_sql, params = item_filter_sql(filters)
     sql = f"""
         SELECT a.*, i.row_id, i.qid, i.permissions, i.state_sha256, l.pseudonym, l.kind AS labeler_kind,
-               b.name AS batch_name, sb.name AS relabel_of, b.show_model_answer, b.reason_set_json
+               b.name AS batch_name, sb.name AS relabel_of, b.show_model_answer, b.reason_set_json,
+               b.task_type
         FROM annotations a
         JOIN items i ON i.item_id = a.item_id
         JOIN labelers l ON l.id = a.labeler_id
@@ -109,11 +110,17 @@ def load_annotations(conn: sqlite3.Connection, filters: Filters = Filters()) -> 
                     "text": s["text"], "role": s["role"], "option": s["option"],
                     "reasons": json.loads(s["reasons_json"]), "renderer": s["renderer"],
                 })
-    return [_record(r, spans_by_ann.get(r["id"], [])) for r in rows]
+    from .clauses import stored_clauses
+
+    clauses = stored_clauses(conn, [r["id"] for r in rows if r["task_type"] == "clauses"])
+    return [_record(r, spans_by_ann.get(r["id"], []), clauses.get(r["id"], [])) for r in rows]
 
 
-def _record(r: sqlite3.Row, spans: list) -> dict:
+def _record(r: sqlite3.Row, spans: list, clauses: list = ()) -> dict:
+    """§5.4. A clauses-batch record has answerable/reasons null and carries label + clauses instead."""
     skipped = r["skipped_code"]
+    task = r["task_type"] or "reasons"
+    clause_task = task == "clauses"
     reasons = json.loads(r["reasons_json"]) if r["reasons_json"] else None
     if reasons is not None:
         reasons = {k: reasons.get(k) for k in REASONS}
@@ -133,6 +140,11 @@ def _record(r: sqlite3.Row, spans: list) -> dict:
         "reasons": None if skipped else reasons,
         "spans": [] if skipped else spans,
         "relation": json.loads(r["relation_json"]) if r["relation_json"] else None,
+        "task": task,
+        "label": None if skipped or not clause_task else r["label"],
+        "label_derived": None if skipped or not clause_task else r["label_derived"],
+        "clauses": None if not clause_task else ([] if skipped else list(clauses)),
+        "completion": json.loads(r["completion_json"]) if clause_task and r["completion_json"] else None,
         "note": r["note"],
         "skipped": skipped,
         "policy_override": bool(r["policy_override"]),
@@ -197,7 +209,7 @@ def agreement_inputs(conn: sqlite3.Connection, filters: Filters = Filters()) -> 
     from .analysis import agreement_record
     from .spans_agreement import span_units, state_universe
 
-    loaded = load_annotations(conn, filters)
+    loaded = [r for r in load_annotations(conn, filters) if r["task"] != "clauses"]  # clauses: clauses_agreement
     items: dict = {}
     records = []
     labelers = defaultdict(set)

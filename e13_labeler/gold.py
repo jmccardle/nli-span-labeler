@@ -111,7 +111,9 @@ def promote(conn: sqlite3.Connection, item_id: str, labeler: str, explanation: O
            ORDER BY a.created_at DESC, a.version DESC, a.id DESC LIMIT 1""", (item_id, labeler)).fetchone()
     if ann is None:
         raise ValueError(f"{labeler} has no annotation of {item_id!r} to promote")
-    reasons = [r for r, v in json.loads(ann["reasons_json"]).items() if v]
+    if ann["reasons_json"] is None:
+        raise ValueError(f"{item_id!r} was labelled in a clauses batch; gold is reasons gold only")
+    reasons =[r for r, v in json.loads(ann["reasons_json"]).items() if v]
     spans = [{"side": s["side"], "role": s["role"], "text": s["text"], "option": s["option"],
               "pointer": s["pointer"], "start": s["start"], "end": s["end"], "reasons": json.loads(s["reasons_json"])}
              for s in conn.execute("SELECT * FROM spans WHERE annotation_id = ? ORDER BY id", (ann["id"],))]

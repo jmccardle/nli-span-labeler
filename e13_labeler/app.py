@@ -581,6 +581,22 @@ class SpanIn(BaseModel):
     reasons: list[str] = Field(default_factory=list, description="Checked reasons this span triggered")
 
 
+class EvidenceIn(BaseModel):
+    start: int
+    end: int
+    text: str = Field(..., description="The selected premise text; must equal the slice of the rendering")
+
+
+class ClauseIn(BaseModel):
+    start: int = Field(..., description="Offsets into the hypothesis (code points)")
+    end: int
+    text: str
+    stance: str = Field(..., description="supported, contradicted, undetermined or unaddressed")
+    omission: bool = Field(False, description="contradicted by what an exhaustive premise scope leaves out")
+    note: Optional[str] = None
+    evidence: list[EvidenceIn] = Field(default_factory=list, description="Premise spans the stance rests on")
+
+
 class AnnotationIn(BaseModel):
     item_id: str
     answerable: bool = False
@@ -589,6 +605,10 @@ class AnnotationIn(BaseModel):
     spans: list[SpanIn] = Field(default_factory=list)
     policy_override: bool = Field(False, description="Shift+Enter: save despite unmet span policy")
     active_ms: Optional[int] = Field(None, description="Client-measured active time (FR-22)")
+    # `clauses` batches (docs/e13/CLAUSE_TASK.md); the reasons fields above are then unused
+    clauses: list[ClauseIn] = Field(default_factory=list)
+    label_override: Optional[str] = Field(None, description="Overrides the derived label; needs a note")
+    completion: Optional[dict[str, Optional[str]]] = Field(None, description='{"entail": ..., "contradict": ...}')
 
 
 class SkipIn(BaseModel):
@@ -689,6 +709,8 @@ def _probe_candidate(conn, batch, labeler: dict):
     """
     if labeler["role"] == "owner":
         return None
+    if batch["task_type"] != "reasons":
+        return None  # gold is reasons gold; it would be served in the wrong form
     sql, params = _batch_filter(batch, labeler)
     return conn.execute(
         f"""SELECT i.* FROM gold g JOIN items i ON i.item_id = g.item_id
@@ -866,8 +888,15 @@ async def submit_annotation(body: AnnotationIn, labeler: dict = Depends(require_
     """
     Validates FR-13 to FR-19 and stores one annotation version with its spans.
     Unmet span policy answers 422 with ``policy: true``; resubmit with
-    ``policy_override`` to save anyway (recorded).
+    ``policy_override`` to save anyway (recorded). In a ``clauses`` batch the
+    body carries clauses instead (docs/e13/CLAUSE_TASK.md).
     """
+    with get_db() as conn:
+        item, batch, probe = _assignment(conn, body.item_id, labeler)
+        if batch["task_type"] == "clauses":
+            annotation_id, override = _save_clauses(conn, body, item, batch, labeler, version=1, probe=probe)
+            release_lock(conn, item["item_id"], labeler["id"])
+            return {"status": "saved", "annotation_id": annotation_id, "version": 1, "policy_override": override}
     submission = Submission(
         answerable=body.answerable, reasons=body.reasons, note=body.note,
         spans=[Span(**s.model_dump()) for s in body.spans],
@@ -912,6 +941,36 @@ async def submit_annotation(body: AnnotationIn, labeler: dict = Depends(require_
             check_auto_pause(conn, labeler)
     return {"status": "saved", "annotation_id": annotation_id, "version": 1,
             "policy_override": submission.policy_override}
+
+
+def _save_clauses(conn, body: AnnotationIn, item, batch, labeler: dict, *, version: int, probe: bool,
+                  latest=None) -> tuple[int, bool]:
+    """Validate and store one `clauses` annotation version. Returns (annotation id, policy_override)."""
+    from .clauses import insert_clauses, parse_submission, validate_clauses
+
+    if body.answerable or body.reasons or body.spans:
+        raise HTTPException(422, {"policy": False, "problems": ["a clauses batch takes clauses, not reasons or spans"]})
+    sub = parse_submission(body.model_dump())
+    try:
+        validate_clauses(sub, state=item["state"], state_format=item["state_format"],
+                         question=json.loads(item["question_json"]))
+    except PolicyViolation as e:
+        raise HTTPException(422, {"policy": True, "problems": e.problems})
+    except SubmissionError as e:
+        raise HTTPException(422, {"policy": False, "problems": e.problems})
+    cur = conn.execute(
+        """INSERT INTO annotations (item_id, batch_id, labeler_id, version, answerable, reasons_json, note,
+                                    policy_override, is_gold_probe, active_ms, wall_ms, guideline_version,
+                                    app_version, asof, position_in_state_run, label, label_derived, completion_json)
+           VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (item["item_id"], batch["id"], labeler["id"], version, sub.note, int(sub.policy_override), int(probe),
+         sub.active_ms, None if latest else _wall_ms(conn, item["item_id"], labeler["id"]), guideline_in_force(batch),
+         config.app_version(), latest["asof"] if latest else _served_asof(conn, item, labeler["id"]),
+         latest["position_in_state_run"] if latest else None, sub.label, sub.label_derived,
+         json.dumps(sub.completion, ensure_ascii=False) if sub.completion else None),
+    )
+    insert_clauses(conn, cur.lastrowid, sub.clauses)
+    return cur.lastrowid, sub.policy_override
 
 
 # ============================================================================
@@ -969,7 +1028,9 @@ async def history(labeler: dict = Depends(require_active)):
         rows = _recent_submissions(conn, labeler)
         return {"submissions": [{
             "annotation_id": a["id"], "item_id": a["item_id"], "batch": f"batch {b['id']}", "version": a["version"],
-            "answerable": bool(a["answerable"]), "reasons": [r for r, v in json.loads(a["reasons_json"]).items() if v],
+            "answerable": bool(a["answerable"]),
+            "reasons": [r for r, v in json.loads(a["reasons_json"] or "{}").items() if v],
+            "label": a["label"],
             "created_at": a["created_at"], "editable": b["status"] != "closed",
         } for a, b in rows]}
 
@@ -983,8 +1044,15 @@ async def history_item(annotation_id: int, labeler: dict = Depends(require_activ
         payload["asof"] = latest["asof"] or payload["asof"]  # what they saw the first time
         payload["edit"] = {"annotation_id": latest["id"], "version": latest["version"],
                            "answerable": bool(latest["answerable"]),
-                           "reasons": [r for r, v in json.loads(latest["reasons_json"]).items() if v],
+                           "reasons": [r for r, v in json.loads(latest["reasons_json"] or "{}").items() if v],
                            "note": latest["note"], "spans": _stored_spans(conn, latest["id"])}
+        if batch["task_type"] == "clauses":
+            from .clauses import completion_of, stored_clauses
+
+            payload["edit"].update({
+                "clauses": stored_clauses(conn, [latest["id"]]).get(latest["id"], []),
+                "label_override": latest["label"] if latest["label"] != latest["label_derived"] else None,
+                "completion": completion_of(latest)})
         return payload
 
 
@@ -994,6 +1062,16 @@ async def edit_annotation(annotation_id: int, body: AnnotationIn, labeler: dict 
     FR-21: every edit is a new version; the old one is kept (NFR-6). α and the
     exports use the latest version. Allowed until the batch closes.
     """
+    with get_db() as conn:
+        latest, batch = _edit_target(conn, labeler, annotation_id)
+        if batch["task_type"] == "clauses":
+            if body.item_id != latest["item_id"]:
+                raise HTTPException(422, "item_id doesn't match the annotation")
+            item = fetch_visible_item(conn, latest["item_id"], labeler)
+            version = latest["version"] + 1
+            new_id, override = _save_clauses(conn, body, item, batch, labeler, version=version,
+                                             probe=bool(latest["is_gold_probe"]), latest=latest)
+            return {"status": "saved", "annotation_id": new_id, "version": version, "policy_override": override}
     submission = Submission(
         answerable=body.answerable, reasons=body.reasons, note=body.note,
         spans=[Span(**s.model_dump()) for s in body.spans],

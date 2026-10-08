@@ -20,6 +20,11 @@
   "reasons",
   "spans",
   "relation",
+  "task",
+  "label",
+  "label_derived",
+  "clauses",
+  "completion",
   "note",
   "skipped",
   "policy_override",
@@ -319,6 +324,134 @@
   "created_at": {
    "type": "string",
    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+  },
+  "task": {
+   "enum": [
+    "reasons",
+    "reasons+relation",
+    "relation",
+    "clauses"
+   ],
+   "description": "The batch's task type (docs/e13/CLAUSE_TASK.md for clauses)"
+  },
+  "label": {
+   "enum": [
+    "entailment",
+    "neutral",
+    "contradiction",
+    null
+   ],
+   "description": "clauses task: the final sentence label"
+  },
+  "label_derived": {
+   "enum": [
+    "entailment",
+    "neutral",
+    "contradiction",
+    null
+   ],
+   "description": "clauses task: the label the clause stances give"
+  },
+  "clauses": {
+   "type": [
+    "array",
+    "null"
+   ],
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "start",
+     "end",
+     "text",
+     "stance",
+     "omission",
+     "note",
+     "evidence"
+    ],
+    "properties": {
+     "start": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "end": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "text": {
+      "type": "string"
+     },
+     "stance": {
+      "enum": [
+       "supported",
+       "contradicted",
+       "undetermined",
+       "unaddressed"
+      ]
+     },
+     "omission": {
+      "type": "boolean"
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "evidence": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "start",
+        "end",
+        "text",
+        "renderer"
+       ],
+       "properties": {
+        "start": {
+         "type": "integer",
+         "minimum": 0
+        },
+        "end": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "text": {
+         "type": "string"
+        },
+        "renderer": {
+         "type": "string"
+        }
+       }
+      },
+      "description": "Premise spans: offsets into the state's canonical rendering"
+     }
+    }
+   },
+   "description": "clauses task: hypothesis clauses in hypothesis order; null otherwise"
+  },
+  "completion": {
+   "type": [
+    "object",
+    "null"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "entail": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "contradict": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   }
   }
  }
 }

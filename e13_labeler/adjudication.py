@@ -33,7 +33,8 @@ def _first_pass(conn: sqlite3.Connection, filters: Filters) -> dict:
     # Items stay adjudicable after promotion to gold; probe answers are still left out
     for r in load_annotations(conn, Filters(**{**filters.__dict__, "include_models": False,
                                                "include_skipped": False, "include_gold": True})):
-        if r["labeler_kind"] == "human" and r["_relabel_of"] is None and r["_blind"] and not r["_gold_probe"]:
+        if (r["labeler_kind"] == "human" and r["_relabel_of"] is None and r["_blind"] and not r["_gold_probe"]
+                and r["task"] != "clauses"):  # clause adjudication isn't built (docs/e13/CLAUSE_TASK.md)
             by_item[r["item_id"]].append(r)
     return by_item
 
