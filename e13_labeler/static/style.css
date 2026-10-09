@@ -1193,3 +1193,6 @@ pre.json-block { white-space: pre-wrap; font-size: 0.8rem; color: var(--text-sec
 .dataset-row { cursor: pointer; }
 .dataset-row:hover td { background: rgba(74, 158, 255, 0.08); }
 @media (max-width: 1100px) { .annot-grid { grid-template-columns: 1fr; } }
+.annot-reference { margin-bottom: 12px; font-size: 0.85rem; border: 1px dashed var(--accent); }
+.ref-chip { display: inline-block; margin: 2px 6px 2px 0; }
+.tok.ref-ev { box-shadow: inset 0 -3px 0 rgba(74, 158, 255, 0.85); }

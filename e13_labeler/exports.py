@@ -310,7 +310,13 @@ def history_rows(conn: sqlite3.Connection, filters: Filters, text_included: bool
         clauses = stored_clauses(conn, [a["id"] for a in anns])
         accepted = {p["accepted_annotation_id"]: p["id"] for p in conn.execute(
             "SELECT id, accepted_annotation_id FROM proposals WHERE accepted_annotation_id IS NOT NULL")}
+        # A version saved after the labeler opened the item's reference is not their blind answer
+        seen = conn.execute("SELECT MIN(created_at) FROM audit_log WHERE action = 'reference_view' AND target = ? "
+                            "AND actor_id = ?", (item_id, lid)).fetchone()[0]
         versions = [{"version": a["version"], "label": a["label"], "label_derived": a["label_derived"],
+                     # strict: the reference opens only once a version exists, so one saved in the
+                     # same second as the first view came before it
+                     "after_reference": bool(seen and a["created_at"] > seen),
                      "skipped": a["skipped_code"], "clauses": [{"text": c["text"], "start": c["start"], "end": c["end"],
                                                                 "stance": c["stance"], "omission": c["omission"],
                                                                 "evidence": [e["text"] for e in c["evidence"]]}
@@ -339,7 +345,8 @@ def history_rows(conn: sqlite3.Connection, filters: Filters, text_included: bool
         spoken = " ".join((u["text"] or "") for u in utts).lower()
         rows.append({
             "schema": HISTORY_SCHEMA, "item_id": item_id, "batch": batch_names.get(bid), "labeler": lab["pseudonym"],
-            "labeler_kind": lab["kind"], "versions": versions, "utterances": utts, "proposals": props, "notes": notes,
+            "labeler_kind": lab["kind"], "reference_seen_at": seen,
+            "versions": versions, "utterances": utts, "proposals": props, "notes": notes,
             "signals": {
                 "n_versions": len(versions), "label_flips": sum(1 for a, b in zip(labels, labels[1:]) if a != b),
                 "final_label": labels[-1] if labels else None,

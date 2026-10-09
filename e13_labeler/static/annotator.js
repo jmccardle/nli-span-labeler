@@ -123,7 +123,7 @@ async function openWorkspace(itemId) {
 // Called by renderItem (label.js) for every item: the panel shows only for workspace payloads
 const ANNOT_HINTS = 'Hypothesis words + <kbd>1</kbd>–<kbd>4</kbd> clause · premise words + <kbd>a</kbd> evidence · ' +
     '<kbd>v</kbd> record · <kbd>y</kbd> accept proposal · <kbd>Enter</kbd> save a version · <kbd>,</kbd> <kbd>.</kbd> prev/next · ' +
-    '<kbd>z</kbd> undo · <kbd>Tab</kbd> premise ⇄ hypothesis';
+    '<kbd>z</kbd> undo · <kbd>Tab</kbd> premise ⇄ hypothesis · <kbd>R</kbd> reference (after your answer)';
 
 function setupAnnotatorView(item) {
     const on = !!item.parse;
@@ -131,6 +131,7 @@ function setupAnnotatorView(item) {
     if (!hints.dataset.queue) hints.dataset.queue = hints.innerHTML;
     hints.innerHTML = on ? ANNOT_HINTS : hints.dataset.queue;
     document.getElementById('annot-panel').classList.toggle('hidden', !on);
+    document.getElementById('annot-reference').classList.add('hidden');
     document.getElementById('label-main').classList.toggle('show-nodes', on && document.getElementById('annot-show-nodes').checked);
     if (!on) {
         A.ws = null;
@@ -162,8 +163,75 @@ function stopPoll() {
     A.poll = null;
 }
 
+// ============================================================================
+// Reference: the dataset's own answer, after yours (the first view is logged)
+// ============================================================================
+
+async function toggleReference() {
+    const box = document.getElementById('annot-reference');
+    if (!box.classList.contains('hidden')) {
+        box.classList.add('hidden');
+        document.querySelectorAll('.tok.ref-ev').forEach(t => t.classList.remove('ref-ev'));
+        return;
+    }
+    if (!A.ws.annotation) return setBanner('Save your own annotation first; the reference opens after it.');
+    const resp = await authenticatedFetch(
+        `/api/annotator/items/${enc(L.annot.itemId)}/reference?batch=${encodeURIComponent(A.batch)}`);
+    const data = await resp.json();
+    if (!resp.ok) return setBanner(data.detail || 'No reference');
+    A.ws.reference_seen_at = data.first_seen_at;
+    renderReference(data.reference);
+    box.classList.remove('hidden');
+    updateRefButton();
+}
+
+function renderReference(ref) {
+    const g = ref.gold || {};
+    const goldText = g.label == null ? '<em>none</em>' : `${escapeHtml(String(g.label))}` +
+        (g.nli && g.nli !== g.label ? ` → <span class="label-${g.nli}">${g.nli}</span>` : '') +
+        (g.option_is_gold != null ? ` · this option ${g.option_is_gold ? 'is' : 'is not'} the gold answer` : '') +
+        (g.dist ? ` · distribution ${escapeHtml(JSON.stringify(g.dist))}` : '');
+    const clauses = (ref.clauses || []).map(c => `<div>${c.stance ? chip(c.stance) : ''} “${escapeHtml(c.text)}”
+        ${c.stance_hint ? `<span class="option-desc">${escapeHtml(c.stance_hint)}</span>` : ''}
+        ${(c.evidence || []).length ? '← ' + c.evidence.map(e => `“${escapeHtml(e.text || '')}”`).join(' ') : ''}
+        <span class="node-pos">${escapeHtml(c.origin || '')}</span></div>`).join('');
+    const ev = (ref.evidence || []);
+    const evText = ev.map(e => `<span class="ref-chip">${escapeHtml(e.side)} “${escapeHtml(e.text || '')}”
+        <span class="node-pos">${escapeHtml([e.role, e.set].filter(Boolean).join(' · '))}</span></span>`).join(' ');
+    const rel = (ref.relations || []).map(r => `<div>${escapeHtml(JSON.stringify(r))}</div>`).join('');
+    const task = ref.task || {};
+    document.getElementById('annot-reference').innerHTML = `
+        <div class="pane-title"><span>Reference · ${escapeHtml(ref.dataset)} · ${escapeHtml(ref.family)} · ${escapeHtml(ref.source_split || '')}</span>
+            <span>first opened ${escapeHtml(A.ws.reference_seen_at || 'now')}; later versions are marked as seen-reference</span></div>
+        <div><strong>Gold:</strong> ${goldText}</div>
+        ${task.instructions && task.instructions !== 'NLI' ? `<div><strong>Original question:</strong> ${escapeHtml(task.instructions)}</div>` : ''}
+        ${clauses ? `<div class="proposal-sub">dataset clauses</div>${clauses}` : ''}
+        ${ev.length ? `<div class="proposal-sub">evidence (highlighted in the texts)</div>${evText}` : ''}
+        ${rel ? `<div class="proposal-sub">relations</div>${rel}` : ''}
+        ${ref.notes ? `<div class="proposal-sub">notes</div><div>${escapeHtml(typeof ref.notes === 'string' ? ref.notes : JSON.stringify(ref.notes))}</div>` : ''}
+        ${ref.window ? `<div class="option-desc">The state is a window of the source: ${escapeHtml(JSON.stringify(ref.window))}</div>` : ''}
+        ${(ref.blank || []).length ? `<div class="option-desc">The source has no: ${ref.blank.map(escapeHtml).join(', ')}</div>` : ''}`;
+    // Highlight the reference evidence on the texts (offsets index the rendering and the hypothesis)
+    const views = { premise: '#state-view', hypothesis: '#hypothesis-view' };
+    ev.forEach(e => {
+        const view = views[e.side];
+        if (!view || e.start == null) return;
+        document.querySelectorAll(`${view} .tok`).forEach(t => {
+            if (+t.dataset.s < e.end && +t.dataset.e > e.start && !/^\s+$/.test(t.textContent)) t.classList.add('ref-ev');
+        });
+    });
+}
+
+function updateRefButton() {
+    const btn = document.getElementById('annot-ref-btn');
+    btn.classList.toggle('hidden', !(A.ws && A.ws.has_reference));
+    btn.disabled = !(A.ws && A.ws.annotation);
+    btn.textContent = A.ws && A.ws.reference_seen_at ? 'reference ✓' : 'reference';
+}
+
 function renderAnnotPanel(trees = true) {
     const ws = A.ws;
+    updateRefButton();
     document.getElementById('annot-where').textContent =
         `${A.idx >= 0 ? `${A.idx + 1}/${A.items.length}` : ''} · ${ws.item_id}`;
     if (trees) {
@@ -455,6 +523,7 @@ function annotKeyDown(e) {
     else if (k === ',') annotStep(-1);
     else if (k === '.') annotStep(1);
     else if (k === 'y' && A.ws && A.ws.proposal) acceptProposal(false);
+    else if (k === 'R') toggleReference();
     else if (k === 'x' || k === 'e') setBanner('In the Dataset view, skipping and "edit earlier" are not needed: every item stays open.');
     else if (k === 'Escape' && L.fromProposal && !L.selection) {
         L.fromProposal = null;

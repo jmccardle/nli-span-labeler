@@ -207,7 +207,10 @@
                     <span id="annot-rec-state" class="question-type"></span>
                     <label class="annot-toggle"><input type="checkbox" id="annot-show-nodes" checked
                            onchange="paintNodeNumbers()"> numbers</label>
+                    <button id="annot-ref-btn" class="btn btn-small" onclick="toggleReference()"
+                            title="The dataset's own answer (R); opens after you save yours">reference</button>
                 </div>
+                <div id="annot-reference" class="pane annot-reference hidden"></div>
                 <div class="annot-grid">
                     <div class="pane">
                         <div class="pane-title"><span>Trees</span><span>click: phrase · Shift-click: word</span></div>

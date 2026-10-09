@@ -15,7 +15,7 @@ from . import annotator
 from .app import AnnotationIn, _batch_filter, _save_clauses, blind_payload, fetch_visible_item
 from .auth import require_active
 from .clauses import completion_of, stored_clauses
-from .db import NOTE_CATEGORIES, get_db
+from .db import NOTE_CATEGORIES, audit, get_db
 from .labelling import PolicyViolation, SubmissionError
 from .parse import item_parse, nodes_for_span
 
@@ -177,7 +177,10 @@ async def workspace(item_id: str, batch: str, labeler: dict = Depends(require_ac
                   "annotation_id": n["annotation_id"], "created_at": n["created_at"]}
                  for n in conn.execute("SELECT * FROM notes WHERE item_id = ? AND labeler_id = ? AND retracted_at IS NULL "
                                        "ORDER BY id", (item_id, lid))]
+        e13 = json.loads(item["e13_json"]) if item["e13_json"] else {}
         return {**payload, "batch": batch, "parse": {"id": parse_id, "nodes": nodes},
+                "has_reference": "reference" in e13,
+                "reference_seen_at": reference_seen_at(conn, item_id, lid),
                 "annotation": _annotation_view(conn, latest, nodes), "versions": versions,
                 "utterances": utterances, "jobs": jobs, "proposal": proposal, "notes": notes}
 
@@ -302,6 +305,37 @@ async def get_audio(utterance_id: int, labeler: dict = Depends(require_active)):
     if not u["audio_path"]:
         raise HTTPException(404, "no audio")
     return FileResponse(u["audio_path"], media_type=(u["audio_mime"] or "application/octet-stream").split(";")[0])
+
+
+# ============================================================================
+# Reference (the item's hidden e13.reference), after the labeler's own answer
+# ============================================================================
+
+def reference_seen_at(conn, item_id: str, labeler_id: int) -> Optional[str]:
+    row = conn.execute("SELECT MIN(created_at) FROM audit_log WHERE action = 'reference_view' AND target = ? "
+                       "AND actor_id = ?", (item_id, labeler_id)).fetchone()
+    return row[0] if row else None
+
+
+@router.get("/items/{item_id:path}/reference", summary="The item's reference (gold, dataset clauses, evidence)")
+async def reference(item_id: str, batch: str, labeler: dict = Depends(require_active)):
+    """
+    Curated batches aren't blind measurement, but a reference seen before
+    answering would make the answer a copy. So it opens only once the labeler has
+    saved an annotation of the item; the first view is audit-logged, and the
+    history export marks versions saved after it.
+    """
+    with get_db() as conn:
+        b = _batch(conn, batch)
+        item = _item_in_batch(conn, item_id, b, labeler)
+        if annotator.latest_annotation(conn, item_id, labeler["id"], b["id"]) is None:
+            raise HTTPException(403, "Save your own annotation first; the reference opens after it.")
+        e13 = json.loads(item["e13_json"]) if item["e13_json"] else {}
+        ref = e13.get("reference")
+        if ref is None:
+            raise HTTPException(404, "this item has no reference")
+        audit(conn, labeler["id"], "reference_view", item_id, {"batch": b["name"]})
+        return {"reference": ref, "first_seen_at": reference_seen_at(conn, item_id, labeler["id"])}
 
 
 # ============================================================================

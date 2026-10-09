@@ -304,6 +304,39 @@ class TestPipeline:
         assert s["hedged_notes"] == 1 and s["hedge_words_spoken"] >= 2 and s["agent_questions"] == 1
         assert all(v["from_proposal"] for v in row["versions"])
 
+    def test_reference_opens_after_my_answer_and_marks_later_versions(self, curated, owner_client, tmp_path):
+        from e13_labeler.db import get_db
+        from e13_labeler.exports import history_rows
+        from e13_labeler.importer import import_file
+        from e13_labeler.records import Filters
+
+        ref = {"dataset": "esnli", "family": "nli_evidence", "gold": {"label": "contradiction"},
+               "evidence": [{"side": "premise", "start": 9, "end": 17, "text": "standing"}], "clauses": [],
+               "relations": [], "notes": None, "blank": []}
+        row = {**ROWS[0], "id": "r9", "e13": {"reference": ref}}
+        path = tmp_path / "ref.jsonl"
+        path.write_text(json.dumps(row) + "\n")
+        with get_db() as conn:
+            import_file(conn, path, batch="cur", task_type="clauses")
+        item = "r9#clauses"
+        assert ws(owner_client, item)["has_reference"] is True
+        assert "reference" not in json.dumps(ws(owner_client, item)["question"])   # never in the payload
+        r = owner_client.get(url(item, "reference"), params={"batch": "cur"})
+        assert r.status_code == 403
+        clause = {"start": HYP.index("walking"), "end": HYP.index("walking") + 7, "text": "walking",
+                  "stance": "contradicted", "evidence": [{"start": 9, "end": 17, "text": "standing"}]}
+        assert owner_client.post(url(item, "annotations"), params={"batch": "cur"},
+                                 json={"item_id": item, "clauses": [clause]}).status_code == 200
+        r = owner_client.get(url(item, "reference"), params={"batch": "cur"})
+        assert r.status_code == 200 and r.json()["reference"]["gold"]["label"] == "contradiction"
+        assert ws(owner_client, item)["reference_seen_at"]
+        import time
+        time.sleep(1.1)   # timestamps are per second
+        owner_client.post(url(item, "annotations"), params={"batch": "cur"}, json={"item_id": item, "clauses": [clause]})
+        with get_db() as conn:
+            (h,) = [x for x in history_rows(conn, Filters()) if x["item_id"] == item]
+        assert [v["after_reference"] for v in h["versions"]] == [False, True] and h["reference_seen_at"]
+
     def test_other_labelers_cannot_touch_my_proposals(self, curated, owner_client, fresh_client, monkeypatch):
         from tests.conftest import login, make_labeler
 
