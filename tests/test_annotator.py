@@ -47,9 +47,12 @@ class Fake:
         class H(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("content-length", 0)))
-                fake.requests.append({"path": self.path, "ctype": self.headers.get("content-type"), "body": body})
-                out = json.dumps(fake.responses.pop(0) if fake.responses else {}).encode()
-                self.send_response(200)
+                fake.requests.append({"path": self.path, "ctype": self.headers.get("content-type"), "body": body,
+                                      "auth": self.headers.get("authorization")})
+                nxt = fake.responses.pop(0) if fake.responses else {}
+                status, nxt = nxt if isinstance(nxt, tuple) else (200, nxt)
+                out = json.dumps(nxt).encode()
+                self.send_response(status)
                 self.send_header("content-type", "application/json")
                 self.end_headers()
                 self.wfile.write(out)
@@ -228,6 +231,56 @@ class TestPipeline:
         assert w["proposal"]["payload"]["label"] == "entailment"
         audio = owner_client.get(f"/api/annotator/utterances/{w['utterances'][0]['id']}/audio")
         assert audio.status_code == 200 and audio.content.endswith(b"fake webm")
+
+    def test_cloud_engines_keys_models_and_rate_limits(self, curated, owner_client, monkeypatch):
+        """Mistral-style setup: keys by env-var name, model form fields, 429 waits, list-of-chunks content."""
+        from e13_labeler.db import get_db
+
+        stt = Fake([(429, {"message": "rate limited"}),
+                    {"model": "voxtral-mini-latest", "text": "13 is supported by 2.",
+                     "segments": [{"type": "transcription_segment", "text": "13 is supported by 2.", "start": 0.1,
+                                   "end": 1.7}]}])
+        chunks = {"choices": [{"message": {"content": [
+            {"type": "thinking", "thinking": [{"type": "text", "text": "the annotator said 13…"}]},
+            {"type": "text", "text": json.dumps({**AGENT_ANSWER, "clauses": AGENT_ANSWER["clauses"][:1],
+                                                 "relations": [], "notes": []})}]}}]}
+        agent = Fake([chunks])
+        monkeypatch.setenv("TEST_CLOUD_KEY", "sekrit-123")
+        monkeypatch.setenv("E13_STT_URL", stt.url + "/v1/audio/transcriptions")
+        monkeypatch.setenv("E13_STT_MODEL", "voxtral-mini-latest")
+        monkeypatch.setenv("E13_STT_TIMESTAMPS", "segment")
+        monkeypatch.setenv("E13_STT_KEY_ENV", "TEST_CLOUD_KEY")
+        monkeypatch.setenv("E13_AGENT_URL", agent.url + "/v1")
+        monkeypatch.setenv("E13_AGENT_MODEL", "mistral-small-2603")
+        monkeypatch.setenv("E13_AGENT_KEY_ENV", "TEST_CLOUD_KEY")
+        owner_client.post(url(ITEM, "utterances/audio"), params={"batch": "cur"}, content=b"webm bytes",
+                          headers={"content-type": "audio/webm;codecs=opus"})
+        try:
+            first = run_jobs()
+            assert first[0]["status"] == "waiting" and "429" in first[0]["error"]      # rate limit: wait, no failure
+            done = run_jobs()
+        finally:
+            stt.close()
+            agent.close()
+        assert [d["kind"] for d in done] == ["transcribe", "agent"], done
+        body = stt.requests[1]["body"]
+        assert b'name="model"\r\n\r\nvoxtral-mini-latest' in body and b'name="timestamp_granularities"' in body
+        assert b"Content-Type: audio/webm\r\n" in body                                 # codec parameter dropped
+        assert stt.requests[1]["auth"] == agent.requests[0]["auth"] == "Bearer sekrit-123"
+        sent = json.loads(agent.requests[0]["body"])
+        assert sent["model"] == "mistral-small-2603" and sent["response_format"]["json_schema"]["strict"] is True
+        assert ws(owner_client)["proposal"]["payload"]["label"] == "entailment"
+        with get_db() as conn:
+            stored = " ".join(str(tuple(r)) for t in ("jobs", "utterances", "proposals")
+                              for r in conn.execute(f"SELECT * FROM {t}"))
+        assert "sekrit" not in stored                                                   # the key is never stored
+
+    def test_missing_key_waits(self, curated, owner_client, monkeypatch):
+        monkeypatch.setenv("E13_AGENT_URL", "http://127.0.0.1:9/v1")
+        monkeypatch.setenv("E13_AGENT_KEY_ENV", "NOT_SET_ANYWHERE")
+        owner_client.post(url(ITEM, "utterances/text"), params={"batch": "cur"}, json={"text": "13 is supported"})
+        r = run_jobs()[0]
+        assert r["status"] == "waiting" and "NOT_SET_ANYWHERE" in r["error"]
 
     def test_new_utterance_supersedes_a_queued_agent_turn(self, curated, owner_client):
         from e13_labeler.db import get_db

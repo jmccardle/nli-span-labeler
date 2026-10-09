@@ -7,10 +7,18 @@ job -> proposal -> the owner's review. Engines are OpenAI-compatible HTTP
 endpoints; when one is not configured or not answering, its jobs wait and are
 retried, so recording never depends on a model being up.
 
-    E13_STT_URL      e.g. http://127.0.0.1:4998/v1/audio/transcriptions
-    E13_AGENT_URL    e.g. http://127.0.0.1:8870/v1   (…/chat/completions is appended)
-    E13_AGENT_MODEL  model name sent to the agent endpoint (default "agent")
-    E13_AGENT_KEY    optional bearer token
+    E13_STT_URL         e.g. http://127.0.0.1:4998/v1/audio/transcriptions
+                        or   https://api.mistral.ai/v1/audio/transcriptions
+    E13_STT_MODEL       "model" form field (Mistral: voxtral-mini-latest); unset for the local server
+    E13_STT_TIMESTAMPS  "timestamp_granularities" form field (Mistral: segment)
+    E13_STT_KEY_ENV     name of the env var holding the STT bearer token (e.g. MISTRAL_KEY)
+    E13_AGENT_URL       e.g. http://127.0.0.1:8870/v1 or https://api.mistral.ai/v1 (…/chat/completions appended)
+    E13_AGENT_MODEL     model name sent to the agent endpoint (default "agent"; e.g. mistral-small-2603)
+    E13_AGENT_KEY_ENV   name of the env var holding the agent bearer token (or E13_AGENT_KEY, the token itself)
+
+Keys are read from the environment by name, so they never land in the
+database, the job errors or the logs. A 429 (rate limit) makes a job wait,
+like an engine that is down.
 """
 
 import json
@@ -147,11 +155,24 @@ def _post(url: str, body: bytes, headers: dict, timeout: int):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8") or "null")
     except urllib.error.HTTPError as e:
-        if e.code in (502, 503, 504):
+        if e.code in (429, 502, 503, 504):  # rate limited or down: wait and retry, don't count a failure
             raise EngineUnavailable(f"{url}: HTTP {e.code}")
         raise RuntimeError(f"{url}: HTTP {e.code}: {e.read()[:300]!r}")
     except (urllib.error.URLError, ConnectionError, socket.timeout, TimeoutError) as e:
         raise EngineUnavailable(f"{url}: {e}")
+
+
+def _auth(prefix: str) -> dict:
+    """Bearer header from the env var named by {prefix}_KEY_ENV (or the token in {prefix}_KEY)."""
+    name = os.environ.get(f"{prefix}_KEY_ENV")
+    key = os.environ.get(name) if name else os.environ.get(f"{prefix}_KEY")
+    if name and not key:
+        raise EngineUnavailable(f"{prefix}_KEY_ENV names {name}, which is not set in the worker's environment")
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def _form(boundary: str, name: str, value: str) -> bytes:
+    return f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode()
 
 
 def transcribe_audio(path: str, mime: Optional[str]) -> dict:
@@ -159,20 +180,37 @@ def transcribe_audio(path: str, mime: Optional[str]) -> dict:
     url = os.environ.get("E13_STT_URL")
     if not url:
         raise EngineUnavailable("E13_STT_URL is not set")
+    headers = _auth("E13_STT")
     boundary = uuid.uuid4().hex
     data = Path(path).read_bytes()
     name = Path(path).name
     body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n"
-            f"Content-Type: {mime or 'application/octet-stream'}\r\n\r\n").encode() + data + \
-           (f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\nverbose_json"
-            f"\r\n--{boundary}--\r\n").encode()
-    out = _post(url, body, {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            f"Content-Type: {(mime or 'application/octet-stream').split(';')[0]}\r\n\r\n").encode() + data + b"\r\n"
+    model = os.environ.get("E13_STT_MODEL")
+    if model:
+        body += _form(boundary, "model", model)
+    if os.environ.get("E13_STT_TIMESTAMPS"):
+        body += _form(boundary, "timestamp_granularities", os.environ["E13_STT_TIMESTAMPS"])
+    body += f"--{boundary}--\r\n".encode()
+    out = _post(url, body, {**headers, "Content-Type": f"multipart/form-data; boundary={boundary}"},
                 timeout=int(os.environ.get("E13_STT_TIMEOUT", "600")))
     if not isinstance(out, dict) or "text" not in out:
         raise RuntimeError(f"unexpected transcription response: {str(out)[:200]}")
     segments = [{"start": s.get("start"), "end": s.get("end"), "text": s.get("text")}
                 for s in out.get("segments") or [] if isinstance(s, dict)]
-    return {"text": out["text"].strip(), "segments": segments, "engine": url}
+    return {"text": out["text"].strip(), "segments": segments, "engine": f"{url}#{model}" if model else url}
+
+
+def _content_text(content) -> str:
+    """
+    Message content as text. Mistral's reasoning models return a list of chunks
+    ({"type": "text"} / {"type": "thinking", ...}) instead of a string (the same
+    fix as tau's openai provider); thinking is dropped.
+    """
+    if isinstance(content, list):
+        return "".join(c if isinstance(c, str) else (c.get("text") or "") for c in content
+                       if isinstance(c, str) or (isinstance(c, dict) and c.get("type") == "text"))
+    return content or ""
 
 
 def chat(messages: list, schema: dict) -> tuple[dict, str]:
@@ -182,14 +220,13 @@ def chat(messages: list, schema: dict) -> tuple[dict, str]:
         raise EngineUnavailable("E13_AGENT_URL is not set")
     model = os.environ.get("E13_AGENT_MODEL", "agent")
     url = base.rstrip("/") + "/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if os.environ.get("E13_AGENT_KEY"):
-        headers["Authorization"] = f"Bearer {os.environ['E13_AGENT_KEY']}"
+    headers = {"Content-Type": "application/json", **_auth("E13_AGENT")}
     body = {"model": model, "messages": messages, "temperature": 0.2,
-            "response_format": {"type": "json_schema", "json_schema": {"name": "annotation", "schema": schema}}}
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": "annotation", "schema": schema, "strict": True}}}
     out = _post(url, json.dumps(body).encode(), headers, timeout=int(os.environ.get("E13_AGENT_TIMEOUT", "900")))
     try:
-        content = out["choices"][0]["message"]["content"]
+        content = _content_text(out["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError):
         raise RuntimeError(f"unexpected chat response: {str(out)[:200]}")
     text = content.strip()
@@ -244,24 +281,36 @@ The task:
   supported (premise words settle it true), contradicted (premise words settle it false),
   undetermined (related premise words that don't settle it, e.g. "suggests"), unaddressed (nothing in the premise bears on it).
 - supported / contradicted / undetermined clauses carry EVIDENCE: premise spans. unaddressed clauses carry none.
-- omission = true only for a contradicted clause whose evidence is an exhaustive premise scope that leaves it out.
+- omission = true ONLY if the annotator says "omission" (or "left out of the list"). Otherwise false.
 - Words that claim nothing (a, the, is) stay outside clauses. Clauses never overlap.
 - The label is derived: any contradicted -> contradiction; else all supported -> entailment; else neutral. Set \
 label_override only if the annotator explicitly overrides that.
-- completion: for neutral items, sentences the annotator dictated that would make it entailment ("entail") or \
-contradiction ("contradict").
+- completion: null unless the annotator DICTATES an E or C sentence for a neutral item ("E: …", "entail sentence: …"). \
+Never write one yourself.
 
-Spans: a span is a list of node numbers on ONE side (premise or hypothesis). phrase=true means each node's whole \
-phrase (its subtree); phrase=false means exactly those words. "9" usually means node 9's phrase; "word 9" means the word.
+Spans: a span is a list of node numbers on ONE side (premise or hypothesis). Use phrase=false (exactly those words, \
+from the first to the last) unless the annotator says "phrase", "whole", "everything under" or similar; then \
+phrase=true expands each node to its subtree. Parses can be wrong, so never expand on your own: "13, talks" is the \
+word 13; "37 to 43" or "37 and 38" lists the words.
 
 Also record:
 - relations the annotator states between spans: referent, supports, suggests, contradicts, more_specific, \
-less_specific, same_as, other (e.g. "2 is the referent of 9" -> from [2] to [9] referent);
-- notes: what they said about a relation, the grammar, part-of-speech tags, word meanings (lexical), the label, \
-or the procedure. Only NEW notes from the new utterances; keep their wording; hedge=true when they sounded unsure.
+less_specific, same_as, other (e.g. "2 is the referent of 9" -> from [2] to [9] referent). Only relations they state; \
+a clause's evidence is already recorded by the clause.
+- notes: every remark they make about meaning, grammar, part of speech, word meanings (lexical), the label or the \
+procedure, and every statement they introduce with "note". Only NEW notes from the new utterances, in THEIR words \
+(lightly cleaned of filler, never paraphrased into a different claim); hedge=true when they sounded unsure ("I'd \
+say", "maybe", "I think").
 
-Return the COMPLETE clause list and relation list after applying the new utterances (keep earlier ones unless the \
-annotator changed them). Answer with JSON only."""
+Apply EVERY edit the annotator states in the NEW utterances: making, re-tagging, splitting, merging or removing \
+clauses; adding or removing evidence; omission; relations; notes; a label override; completion sentences. Apply them \
+in order; a later statement overrides an earlier one ("no, actually 15 is undetermined"). Return the COMPLETE clause \
+list and relation list after applying them: keep earlier ones unless the annotator changed them, and leave out what \
+they removed.
+
+The utterances are speech transcripts: numbers may come as words ("thirteen", "fifteen") or be misheard. Map them to \
+node numbers using the trees and the words the annotator names alongside them; if a number doesn't fit the words they \
+describe, use the words and say so in "questions". Answer with JSON only."""
 
 
 def _numbered_line(nodes: list, text: str) -> str:
@@ -367,6 +416,15 @@ def resolve_proposal(raw: dict, nodes: dict, item) -> tuple[dict, list]:
     payload = {"clauses": clauses, "relations": relations, "notes": notes,
                "label_override": raw.get("label_override"), "completion": raw.get("completion"),
                "questions": [q for q in raw.get("questions") or [] if isinstance(q, str) and q.strip()]}
+    # Completion sentences belong to neutral items only; drop them (noted) rather than void the proposal
+    completion = payload["completion"] or {}
+    if any((completion.get(k) or "").strip() for k in ("entail", "contradict")):
+        from .clauses import derive_label
+
+        label = payload["label_override"] or (derive_label(c["stance"] for c in clauses) if clauses else None)
+        if label != "neutral":
+            problems.append(f"dropped completion sentences: the label is {label}, and they are for neutral items")
+            payload["completion"] = None
     # Check the clause core the way a save would (soft rules are reported, not enforced here)
     sub = submission_from(payload, note=None, policy_override=True)
     try:
