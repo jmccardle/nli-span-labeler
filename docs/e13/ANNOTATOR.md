@@ -232,7 +232,18 @@ python -m e13_labeler worker
   API as is.
 - **Agent:** `llama-server -m <gguf> --alias agent --port 8870` works, with Qwen3.6-27B (used in E17) or a smaller
   model.
-- **When an engine is down:** its jobs show `waiting` with the reason, and are retried every 30 s.
+- **When an engine is down:** its jobs show `waiting` with the reason, and are retried every 30 s. A 429 rate
+  limit is treated the same way.
+
+**The owner instance runs on Mistral** (2026-10-09; `/storage/e13-labeler-data/worker.sh`):
+- **Transcription:** `voxtral-mini-latest` at `https://api.mistral.ai/v1/audio/transcriptions`, with segment
+  timestamps. It takes the browser's webm/opus as is and writes spoken numbers as digits.
+- **Scribe:** `mistral-small-2603` with a strict JSON schema.
+- **Key:** read from the `MISTRAL_KEY` line of `~/.bashrc` into the worker's environment
+  (`E13_STT_KEY_ENV` / `E13_AGENT_KEY_ENV` = `MISTRAL_KEY`). It is never written to a file, the DB or a log.
+- **What reaches Mistral:** the recording, then the item's premise and hypothesis, the parse, the current
+  annotation, the notes and the transcripts. Gold and model answers never do.
+- **Stopping it:** `kill $(cat /storage/e13-labeler-data/worker.pid)`. Recordings then queue until it restarts.
 
 **Tests** (fake engines, no model runs):
 - `tests/test_annotator.py`;
