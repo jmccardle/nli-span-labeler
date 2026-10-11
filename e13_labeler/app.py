@@ -621,6 +621,8 @@ class AnnotationIn(BaseModel):
     clauses: list[ClauseIn] = Field(default_factory=list)
     label_override: Optional[str] = Field(None, description="Overrides the derived label; needs a note")
     completion: Optional[dict[str, Optional[str]]] = Field(None, description='{"entail": ..., "contradict": ...}')
+    # Annotator mode: the version's relations (null keeps the previous version's)
+    relations: Optional[list[dict]] = Field(None, description="[{from, to, type, note}] with spans in offsets")
 
 
 class SkipIn(BaseModel):

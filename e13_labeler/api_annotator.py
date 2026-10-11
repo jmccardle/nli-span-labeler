@@ -166,12 +166,21 @@ async def workspace(item_id: str, batch: str, labeler: dict = Depends(require_ac
                  "utterance_id": j["utterance_id"], "created_at": j["created_at"], "finished_at": j["finished_at"]}
                 for j in conn.execute("SELECT * FROM jobs WHERE item_id = ? AND labeler_id = ? AND batch_id = ? "
                                       "ORDER BY id DESC LIMIT 20", (item_id, lid, b["id"]))]
-        p = conn.execute("SELECT * FROM proposals WHERE item_id = ? AND labeler_id = ? AND batch_id = ? "
-                         "AND status = 'pending' ORDER BY id DESC LIMIT 1", (item_id, lid, b["id"])).fetchone()
-        proposal = None if p is None else {
+        # Proposals stack: each holds edits; the view is the latest version with all of them applied in order
+        proposals = [{
             "id": p["id"], "payload": json.loads(p["payload_json"] or "{}"), "problems": json.loads(p["problems_json"]),
             "utterance_ids": json.loads(p["utterance_ids_json"]), "created_at": p["created_at"],
             "base_annotation_id": p["base_annotation_id"], "stale": p["parse_id"] != parse_id}
+            for p in annotator.pending_proposals(conn, item_id, lid, b["id"])]
+        view = None
+        if proposals:
+            from .clauses import derive_label
+
+            view = annotator.view_state(conn, item_id, lid, b["id"])
+            for c in view["clauses"]:
+                c["nodes"] = nodes_for_span(nodes, "hypothesis", c["start"], c["end"])
+            derived = derive_label(c["stance"] for c in view["clauses"]) if view["clauses"] else None
+            view["label_derived"], view["label"] = derived, view["label_override"] or derived
         notes = [{"id": n["id"], "category": n["category"], "text": n["text"], "hedge": bool(n["hedge"]),
                   "nodes": json.loads(n["target_json"]).get("nodes", []), "source": n["source"],
                   "annotation_id": n["annotation_id"], "created_at": n["created_at"]}
@@ -182,7 +191,8 @@ async def workspace(item_id: str, batch: str, labeler: dict = Depends(require_ac
                 "has_reference": "reference" in e13,
                 "reference_seen_at": reference_seen_at(conn, item_id, lid),
                 "annotation": _annotation_view(conn, latest, nodes), "versions": versions,
-                "utterances": utterances, "jobs": jobs, "proposal": proposal, "notes": notes}
+                "utterances": utterances, "jobs": jobs, "proposals": proposals,
+                "proposal": proposals[-1] if proposals else None, "pending_view": view, "notes": notes}
 
 
 # ============================================================================
@@ -206,20 +216,29 @@ async def save_annotation(item_id: str, batch: str, body: AnnotationIn, labeler:
         b = _batch(conn, batch)
         item = _item_in_batch(conn, item_id, b, labeler)
         aid, version, override, latest = _save(conn, body, item, b, labeler)
-        annotator.carry_relations(conn, latest["id"] if latest else None, aid)
+        if body.relations is not None:
+            annotator.store_relations(conn, aid, body.relations)
+        else:
+            annotator.carry_relations(conn, latest["id"] if latest else None, aid)
         return {"status": "saved", "annotation_id": aid, "version": version, "policy_override": override}
 
 
 class AcceptIn(BaseModel):
-    """Optional edits: when ``clauses`` is given, it replaces the proposal's clause core."""
+    """Optional edits: when given, they replace the result (clauses; relations too when set)."""
     edits: Optional[AnnotationIn] = None
     policy_override: bool = False
     note: Optional[str] = None
     active_ms: Optional[int] = None
 
 
-@router.post("/proposals/{proposal_id}/accept", summary="Accept a proposal (optionally edited) as a new version")
+@router.post("/proposals/{proposal_id}/accept",
+             summary="Accept pending proposals up to this one: their edits on top of my latest version")
 async def accept(proposal_id: int, body: AcceptIn, labeler: dict = Depends(require_active)):
+    """
+    Proposals hold edits, not snapshots. Accepting one applies it, and every
+    earlier pending proposal of the item, in order, to the CURRENT latest version
+    (so manual saves in between are kept), and saves the result as one new version.
+    """
     with get_db() as conn:
         p = _owned(conn, "proposals", proposal_id, labeler)
         if p["status"] != "pending":
@@ -227,21 +246,30 @@ async def accept(proposal_id: int, body: AcceptIn, labeler: dict = Depends(requi
         b = conn.execute("SELECT * FROM batches WHERE id = ?", (p["batch_id"],)).fetchone()
         b = _batch(conn, b["name"])
         item = _item_in_batch(conn, p["item_id"], b, labeler)
-        payload = json.loads(p["payload_json"] or "{}")
+        through = annotator.pending_proposals(conn, item["item_id"], labeler["id"], b["id"], through=proposal_id)
+        state = annotator.annotation_state(conn, annotator.latest_annotation(conn, item["item_id"], labeler["id"], b["id"]))
+        for q in through:
+            state, _ = annotator.apply_delta(state, json.loads(q["payload_json"] or "{}").get("delta") or {})
+        relations = state["relations"]
         if body.edits is not None:
             ann = body.edits.model_copy(update={"item_id": item["item_id"]})
+            if body.edits.relations is not None:
+                relations = body.edits.relations
         else:
-            ann = AnnotationIn(item_id=item["item_id"], clauses=payload.get("clauses") or [],
-                               label_override=payload.get("label_override"), completion=payload.get("completion"),
+            ann = AnnotationIn(item_id=item["item_id"], clauses=state["clauses"],
+                               label_override=state["label_override"], completion=state["completion"],
                                note=body.note, policy_override=body.policy_override, active_ms=body.active_ms)
         aid, version, override, _ = _save(conn, ann, item, b, labeler)
-        utt = json.loads(p["utterance_ids_json"])
-        annotator.store_extras(conn, aid, item["item_id"], labeler["id"], payload, proposal_id=proposal_id,
-                               utterance_id=utt[-1] if utt else None)
-        conn.execute("UPDATE proposals SET status = 'accepted', accepted_annotation_id = ?, reviewed_at = ? WHERE id = ?",
-                     (aid, annotator.iso(annotator.now()), proposal_id))
-        annotator.log_review(conn, labeler["id"], proposal_id, "accept", aid)
-        return {"status": "saved", "annotation_id": aid, "version": version, "policy_override": override}
+        annotator.store_relations(conn, aid, relations)
+        for q in through:
+            utt = json.loads(q["utterance_ids_json"])
+            annotator.store_notes(conn, aid, item["item_id"], labeler["id"], json.loads(q["payload_json"] or "{}"),
+                                  proposal_id=q["id"], utterance_id=utt[-1] if utt else None)
+            conn.execute("UPDATE proposals SET status = 'accepted', accepted_annotation_id = ?, reviewed_at = ? "
+                         "WHERE id = ?", (aid, annotator.iso(annotator.now()), q["id"]))
+            annotator.log_review(conn, labeler["id"], q["id"], "accept", aid)
+        return {"status": "saved", "annotation_id": aid, "version": version, "policy_override": override,
+                "accepted": [q["id"] for q in through]}
 
 
 @router.post("/proposals/{proposal_id}/reject", summary="Reject a proposal (kept, marked rejected)")

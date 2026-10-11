@@ -20,21 +20,27 @@ ROWS = [{"id": f"p{i}", "source": "snli", "split": "test", "state": PREMISE, "st
          "questions": {"clauses": Q}} for i in range(2)]
 ITEM = "p0#clauses"
 # premise nodes 1-11 (A man is standing in the doorway of a building .), hypothesis 12-19
-AGENT_ANSWER = {
-    "clauses": [{"span": {"nodes": [13], "phrase": False}, "stance": "supported",
-                 "evidence": [{"nodes": [2], "phrase": False}], "omission": False},
-                {"span": {"nodes": [15], "phrase": False}, "stance": "contradicted",
-                 "evidence": [{"nodes": [4], "phrase": False}], "omission": False},
-                {"span": {"nodes": [16], "phrase": True}, "stance": "undetermined",
-                 "evidence": [{"nodes": [5], "phrase": True}], "omission": False}],
-    "relations": [{"from": {"nodes": [2], "phrase": False}, "to": {"nodes": [13], "phrase": False},
-                   "type": "referent", "note": None}],
-    "notes": [{"nodes": [4, 15], "category": "lexical", "text": "standing and walking can't both hold now",
-               "hedge": False},
-              {"nodes": [16], "category": "relation", "text": "a doorway might lead into a room, I think",
-               "hedge": True}],
-    "label_override": None, "completion": None, "questions": [],
-}
+CLAUSE_MAN = {"span": {"nodes": [13], "phrase": False}, "stance": "supported",
+              "evidence": [{"nodes": [2], "phrase": False}], "omission": False}
+CLAUSE_WALKING = {"span": {"nodes": [15], "phrase": False}, "stance": "contradicted",
+                  "evidence": [{"nodes": [4], "phrase": False}], "omission": False}
+CLAUSE_ROOM = {"span": {"nodes": [16], "phrase": True}, "stance": "undetermined",
+               "evidence": [{"nodes": [5], "phrase": True}], "omission": False}
+REFERENT = {"from": {"nodes": [2], "phrase": False}, "to": {"nodes": [13], "phrase": False}, "type": "referent",
+            "note": None}
+
+
+def edits(**kw):
+    """An agent answer: edits to the current annotation (nothing by default)."""
+    out = {"add_clauses": [], "change_clauses": [], "remove_clauses": [], "add_relations": [], "remove_relations": [],
+           "notes": [], "label_override": None, "completion": None, "questions": []}
+    return {**out, **kw}
+
+
+AGENT_ANSWER = edits(
+    add_clauses=[CLAUSE_MAN, CLAUSE_WALKING, CLAUSE_ROOM], add_relations=[REFERENT],
+    notes=[{"nodes": [4, 15], "category": "lexical", "text": "standing and walking can't both hold now", "hedge": False},
+           {"nodes": [16], "category": "relation", "text": "a doorway might lead into a room, I think", "hedge": True}])
 
 
 class Fake:
@@ -196,11 +202,12 @@ class TestPipeline:
         assert agent.requests[0]["path"] == "/v1/chat/completions"
         assert sent["response_format"]["type"] == "json_schema"
         prompt = sent["messages"][1]["content"]
-        assert "walking[15]" in prompt and "(NEW, label" in prompt and "13 is supported by 2" in prompt
+        assert "walking[15]" in prompt and "(NEW, #" in prompt and "13 is supported by 2" in prompt
         assert "entailment" not in prompt.split("WHAT THE ANNOTATOR SAID")[0].split("HYPOTHESIS:")[0]  # no gold
 
         p = ws(owner_client)["proposal"]
-        assert [c["text"] for c in p["payload"]["clauses"]] == ["man", "walking", "into a room"]
+        assert [c["text"] for c in p["payload"]["preview"]["clauses"]] == ["man", "walking", "into a room"]
+        assert len(p["payload"]["delta"]["add_clauses"]) == 3
         assert p["payload"]["label"] == "contradiction" and p["problems"] == []
         r = owner_client.post(f"/api/annotator/proposals/{p['id']}/accept", json={})
         assert r.status_code == 200 and r.json()["version"] == 1, r.text
@@ -212,8 +219,7 @@ class TestPipeline:
 
     def test_audio_is_transcribed_then_proposed(self, curated, owner_client, monkeypatch):
         stt = Fake([{"text": " 13 is supported by 2. ", "segments": [{"start": 0.0, "end": 2.1, "text": "13 is…"}]}])
-        agent = Fake([chat_reply({**AGENT_ANSWER, "clauses": AGENT_ANSWER["clauses"][:1], "relations": [],
-                                  "notes": []})])
+        agent = Fake([chat_reply(edits(add_clauses=[CLAUSE_MAN]))])
         monkeypatch.setenv("E13_STT_URL", stt.url + "/v1/audio/transcriptions")
         monkeypatch.setenv("E13_AGENT_URL", agent.url + "/v1")
         r = owner_client.post(url(ITEM, "utterances/audio"), params={"batch": "cur", "duration_ms": 2100},
@@ -242,8 +248,7 @@ class TestPipeline:
                                    "end": 1.7}]}])
         chunks = {"choices": [{"message": {"content": [
             {"type": "thinking", "thinking": [{"type": "text", "text": "the annotator said 13…"}]},
-            {"type": "text", "text": json.dumps({**AGENT_ANSWER, "clauses": AGENT_ANSWER["clauses"][:1],
-                                                 "relations": [], "notes": []})}]}}]}
+            {"type": "text", "text": json.dumps(edits(add_clauses=[CLAUSE_MAN]))}]}}]}
         agent = Fake([chunks])
         monkeypatch.setenv("TEST_CLOUD_KEY", "sekrit-123")
         monkeypatch.setenv("E13_STT_URL", stt.url + "/v1/audio/transcriptions")
@@ -292,8 +297,10 @@ class TestPipeline:
         assert st == ["superseded", "queued"]
 
     def test_bad_agent_output_is_kept_with_problems(self, curated, owner_client, monkeypatch):
-        bad = {**AGENT_ANSWER, "clauses": [{"span": {"nodes": [2], "phrase": False}, "stance": "supported",
-                                             "evidence": [], "omission": False}]}
+        bad = edits(add_clauses=[{"span": {"nodes": [2], "phrase": False}, "stance": "supported", "evidence": [],
+                                  "omission": False}], change_clauses=[{"clause": "c9", "stance": "supported",
+                                                                        "omission": None, "span": None,
+                                                                        "add_evidence": [], "remove_evidence": []}])
         agent = Fake([chat_reply(bad)])
         monkeypatch.setenv("E13_AGENT_URL", agent.url + "/v1")
         owner_client.post(url(ITEM, "utterances/text"), params={"batch": "cur"}, json={"text": "2 is supported"})
@@ -303,6 +310,7 @@ class TestPipeline:
             agent.close()
         p = ws(owner_client)["proposal"]
         assert any("premise, not the hypothesis" in x for x in p["problems"])
+        assert any("no clause 'c9'" in x for x in p["problems"])
         assert owner_client.post(f"/api/annotator/proposals/{p['id']}/reject").json()["status"] == "rejected"
 
     def test_edited_accept_and_typed_notes(self, curated, owner_client, monkeypatch):
@@ -331,8 +339,7 @@ class TestPipeline:
         from e13_labeler.exports import write_export
         from e13_labeler.records import Filters
 
-        flip = {**AGENT_ANSWER, "clauses": AGENT_ANSWER["clauses"][:1], "relations": [], "notes": [],
-                "questions": ["Is 'a room' its own clause?"]}
+        flip = edits(remove_clauses=["c2", "c3"], questions=["Is 'a room' its own clause?"])
         agent = Fake([chat_reply(AGENT_ANSWER), chat_reply(flip)])
         monkeypatch.setenv("E13_AGENT_URL", agent.url + "/v1")
         try:
@@ -389,6 +396,59 @@ class TestPipeline:
         with get_db() as conn:
             (h,) = [x for x in history_rows(conn, Filters()) if x["item_id"] == item]
         assert [v["after_reference"] for v in h["versions"]] == [False, True] and h["reference_seen_at"]
+
+    def test_short_utterances_stack_and_nothing_unmentioned_is_dropped(self, curated, owner_client, monkeypatch):
+        """Three short comments -> three pending proposals, each seeing the ones before; accept applies them all."""
+        second = edits(add_clauses=[CLAUSE_WALKING], add_relations=[
+            {"from": {"nodes": [4], "phrase": False}, "to": {"nodes": [15], "phrase": False}, "type": "contradicts",
+             "note": "standing vs walking"}])
+        third = edits(change_clauses=[{"clause": "c2", "stance": "undetermined", "omission": None, "span": None,
+                                       "add_evidence": [], "remove_evidence": []}],
+                      add_relations=[REFERENT])
+        agent = Fake([chat_reply(edits(add_clauses=[CLAUSE_MAN])), chat_reply(second), chat_reply(third)])
+        monkeypatch.setenv("E13_AGENT_URL", agent.url + "/v1")
+        try:
+            for text in ("13 is supported by 2.", "15 contradicts 4; 4 contradicts 15.", "make 15 undetermined; 2 is 13's referent"):
+                owner_client.post(url(ITEM, "utterances/text"), params={"batch": "cur"}, json={"text": text})
+                run_jobs()
+        finally:
+            agent.close()
+        w = ws(owner_client)
+        assert [p["id"] for p in w["proposals"]] == [1, 2, 3]                      # nothing superseded
+        prompts = [json.loads(r["body"])["messages"][1]["content"] for r in agent.requests]
+        assert '"id": "c1"' in prompts[1] and '"text": "man"' in prompts[1]          # turn 2 sees turn 1's clause
+        assert prompts[2].count("(NEW, #") == 1 and prompts[2].count("(earlier, #") == 2
+        v = w["pending_view"]
+        assert [(c["text"], c["stance"]) for c in v["clauses"]] == [("man", "supported"), ("walking", "undetermined")]
+        assert sorted(r["type"] for r in v["relations"]) == ["contradicts", "referent"]
+        # A manual save in between is kept: accept applies the edits to the CURRENT version
+        manual = {"start": HYP.index("room"), "end": HYP.index("room") + 4, "text": "room", "stance": "unaddressed",
+                  "evidence": []}
+        owner_client.post(url(ITEM, "annotations"), params={"batch": "cur"}, json={"item_id": ITEM, "clauses": [manual]})
+        r = owner_client.post(f"/api/annotator/proposals/3/accept", json={})
+        assert r.status_code == 200 and r.json()["accepted"] == [1, 2, 3], r.text
+        w = ws(owner_client)
+        assert [(c["text"], c["stance"]) for c in w["annotation"]["clauses"]] == [
+            ("man", "supported"), ("walking", "undetermined"), ("room", "unaddressed")]
+        assert sorted(r["type"] for r in w["annotation"]["relations"]) == ["contradicts", "referent"]
+        assert w["proposals"] == [] and w["annotation"]["version"] == 2
+
+    def test_manual_save_can_remove_relations(self, curated, owner_client, monkeypatch):
+        agent = Fake([chat_reply(edits(add_clauses=[CLAUSE_MAN], add_relations=[REFERENT]))])
+        monkeypatch.setenv("E13_AGENT_URL", agent.url + "/v1")
+        owner_client.post(url(ITEM, "utterances/text"), params={"batch": "cur"}, json={"text": "2 is 13's referent"})
+        try:
+            run_jobs()
+        finally:
+            agent.close()
+        owner_client.post(f"/api/annotator/proposals/{ws(owner_client)['proposal']['id']}/accept", json={})
+        a = ws(owner_client)["annotation"]
+        body = {"item_id": ITEM, "clauses": [{k: c[k] for k in ("start", "end", "text", "stance", "evidence")}
+                                             for c in a["clauses"]]}
+        owner_client.post(url(ITEM, "annotations"), params={"batch": "cur"}, json=body)       # null: relations kept
+        assert len(ws(owner_client)["annotation"]["relations"]) == 1
+        owner_client.post(url(ITEM, "annotations"), params={"batch": "cur"}, json={**body, "relations": []})
+        assert ws(owner_client)["annotation"]["relations"] == []
 
     def test_other_labelers_cannot_touch_my_proposals(self, curated, owner_client, fresh_client, monkeypatch):
         from tests.conftest import login, make_labeler
