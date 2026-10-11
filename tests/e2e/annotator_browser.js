@@ -39,6 +39,19 @@ const [BASE, SHOTS] = process.argv.slice(2);
   s = await p.evaluate(() => L.selection && L.selection.text);
   check('tree click selects the word', s === 'walking', s);
 
+  // Tree click focuses the node: words outside its subtree dim, and stay dim through a stance key
+  await p.click('.tree-node:has(.node-n:text-is("16"))');
+  const dim = () => p.$$eval('#hypothesis-view .tok.w', ts => ts.filter(t => t.classList.contains('dim')).map(t => t.textContent));
+  let dimmed = await dim();
+  check('focus dims words outside node 16', dimmed.includes('walking') && !dimmed.includes('room'), dimmed);
+  check('selection is the phrase', await p.evaluate(() => L.selection.text) === 'into a room');
+  await p.keyboard.press('Escape');
+  check('focus survives clearing the selection', (await dim()).length > 0);
+  await p.keyboard.press('Escape');
+  check('second Esc clears the focus', (await dim()).length === 0);
+  check('matching words marked', /\d+ matched/.test(await p.innerText('#annot-match-count')) &&
+        (await p.$$('#state-view .tok.match')).length > 0);
+
   // Typed utterance -> agent (fake) -> proposal
   await p.fill('#annot-text', '13 is supported by 2. 15 contradicts 4. 16 is undetermined, 5 suggests it.');
   await p.focus('#annot-text');
@@ -79,6 +92,34 @@ const [BASE, SHOTS] = process.argv.slice(2);
   await p.waitForFunction(() => A.ws && !A.ws.proposal, null, { timeout: 5000 }).catch(() => {});
   check('proposal rejected', await p.evaluate(() => !A.ws.proposal));
 
+  // Two short comments stack as two proposals; accept-all adds both relations and keeps the clauses
+  const say = async (text, n) => {
+    await p.fill('#annot-text', text);
+    await p.focus('#annot-text');
+    await p.keyboard.press('Control+Enter');
+    await p.waitForFunction(n => A.ws && (A.ws.proposals || []).length === n, n, { timeout: 15000 }).catch(() => {});
+  };
+  await say('7, doorway, is less specific than 18, room.', 1);
+  await say('1 to 2 and 12 to 13 are the same subject.', 2);
+  s = await p.evaluate(() => ({ n: A.ws.proposals.length, view: A.ws.pending_view.relations.map(r => r.type),
+                                clauses: A.ws.pending_view.clauses.length }));
+  check('short comments stack', s.n === 2 && s.view.includes('less_specific') && s.view.includes('same_as')
+        && s.clauses === 3, s);
+  await p.click('#state-view');
+  await p.keyboard.press('Escape');
+  await p.keyboard.press('y');
+  await p.waitForFunction(() => A.ws && A.ws.annotation && A.ws.annotation.version === 3, null, { timeout: 5000 }).catch(() => {});
+  s = await p.evaluate(() => ({ v: A.ws.annotation.version, rels: A.ws.annotation.relations.map(r => r.type).sort(),
+                                clauses: A.ws.annotation.clauses.length, pending: A.ws.proposals.length }));
+  check('accept all: one version, all relations, clauses kept', s.v === 3 && s.clauses === 3 && s.pending === 0
+        && JSON.stringify(s.rels) === JSON.stringify(['less_specific', 'referent', 'same_as']), s);
+  await p.click('#annot-relations .chip-x >> nth=0');
+  await p.click('#state-view');
+  await p.keyboard.press('Escape');
+  await p.keyboard.press('Enter');
+  await p.waitForFunction(() => A.ws && A.ws.annotation && A.ws.annotation.version === 4, null, { timeout: 5000 }).catch(() => {});
+  check('a removed relation stays removed', await p.evaluate(() => A.ws.annotation.relations.length) === 2);
+
   // Typed note attached to the selected words
   await p.click('.tree-node:has(.node-n:text-is("18"))', { modifiers: ['Shift'] });
   await p.fill('#annot-note-text', 'a room is more specific than a doorway');
@@ -91,12 +132,15 @@ const [BASE, SHOTS] = process.argv.slice(2);
   await p.keyboard.press('.');
   await p.waitForFunction(() => L && L.item.item_id === 'pair1#clauses', null, { timeout: 5000 }).catch(() => {});
   check('. opens the next item', (await st()).item === 'pair1#clauses');
+  await p.keyboard.press('U');
+  s = await st();
+  check('U marks the uncovered stretch unaddressed', s.clauses.length === 1 && s.clauses[0] === 'unaddressed:man is walking into a room', s);
   await p.click('.nav-tab[data-tab="dataset"]');
-  await p.waitForFunction(() => A.items.length && A.items[0].versions === 2
-                          && /v2/.test(document.querySelector('.dataset-row').innerText), null, { timeout: 5000 })
+  await p.waitForFunction(() => A.items.length && A.items[0].versions === 4
+                          && /v4/.test(document.querySelector('.dataset-row').innerText), null, { timeout: 5000 })
          .catch(() => {});
   const row0 = await p.innerText('.dataset-row >> nth=0');
-  check('list shows label, versions and history', /neutral|contradiction/.test(row0) && /v2/.test(row0) && /🗣2/.test(row0), row0);
+  check('list shows label, versions and history', /neutral|contradiction/.test(row0) && /v4/.test(row0) && /🗣4/.test(row0), row0);
   await p.screenshot({ path: `${SHOTS}/annotator_dataset.png` });
   await p.click('.nav-tab[data-tab="label"]');
   await p.waitForTimeout(500);

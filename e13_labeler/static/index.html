@@ -207,6 +207,9 @@
                     <span id="annot-rec-state" class="question-type"></span>
                     <label class="annot-toggle"><input type="checkbox" id="annot-show-nodes" checked
                            onchange="paintNodeNumbers()"> numbers</label>
+                    <label class="annot-toggle" title="Hypothesis words that also occur in the premise">
+                        <input type="checkbox" id="annot-show-matches" checked onchange="paintMatches()"> matches
+                        <span id="annot-match-count"></span></label>
                     <button id="annot-ref-btn" class="btn btn-small" onclick="toggleReference()"
                             title="The dataset's own answer (R); opens after you save yours">reference</button>
                 </div>
@@ -227,7 +230,9 @@
                         </div>
                     </div>
                     <div class="pane">
-                        <div class="pane-title"><span>Notes</span><span id="annot-versions"></span></div>
+                        <div class="pane-title"><span>Relations</span><span id="annot-versions"></span></div>
+                        <div id="annot-relations" class="annot-list"></div>
+                        <div class="pane-title" style="margin-top: 10px;"><span>Notes</span></div>
                         <div id="annot-notes" class="annot-list"></div>
                         <div class="annot-note-add">
                             <select id="annot-note-cat">

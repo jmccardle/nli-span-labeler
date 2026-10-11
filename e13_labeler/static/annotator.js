@@ -108,8 +108,10 @@ async function openWorkspace(itemId) {
     const ws = await fetchWorkspace(itemId);
     if (!ws) return;
     A.ws = ws;
+    A.focus = {};
     renderItem(ws);   // the clause editor (label.js / clauses.js), then setupAnnotatorView
     L.annot = { batch: A.batch, itemId };
+    L.relations = ws.annotation ? (ws.annotation.relations || []) : [];
     if (ws.annotation) {
         loadClauseEdit(ws.annotation);
         document.getElementById('note').value = ws.annotation.note || '';
@@ -123,7 +125,8 @@ async function openWorkspace(itemId) {
 // Called by renderItem (label.js) for every item: the panel shows only for workspace payloads
 const ANNOT_HINTS = 'Hypothesis words + <kbd>1</kbd>–<kbd>4</kbd> clause · premise words + <kbd>a</kbd> evidence · ' +
     '<kbd>v</kbd> record · <kbd>y</kbd> accept proposal · <kbd>Enter</kbd> save a version · <kbd>,</kbd> <kbd>.</kbd> prev/next · ' +
-    '<kbd>z</kbd> undo · <kbd>Tab</kbd> premise ⇄ hypothesis · <kbd>R</kbd> reference (after your answer)';
+    '<kbd>z</kbd> undo · <kbd>Tab</kbd> premise ⇄ hypothesis · <kbd>U</kbd> rest unaddressed · tree click: select + focus ' +
+    '(<kbd>Esc</kbd> clears) · <kbd>R</kbd> reference (after your answer)';
 
 function setupAnnotatorView(item) {
     const on = !!item.parse;
@@ -237,9 +240,11 @@ function renderAnnotPanel(trees = true) {
     if (trees) {
         renderTrees();
         paintNodeNumbers();
+        paintMatches();
     }
     renderUtterances();
     renderProposal();
+    renderRelations();
     renderNotes();
     const v = ws.versions;
     document.getElementById('annot-versions').textContent = v.length
@@ -267,7 +272,7 @@ function renderTrees() {
         const kids = {};
         const roots = [];
         nodes[side].forEach(n => (n.head === null ? roots : (kids[n.head] = kids[n.head] || [])).push(n));
-        const line = (n, d) => `<div class="tree-node" style="padding-left:${d * 14}px" onclick="selectNode(${n.n}, event.shiftKey)"
+        const line = (n, d) => `<div class="tree-node" data-n="${n.n}" style="padding-left:${d * 14}px" onclick="selectNode(${n.n}, event.shiftKey)"
                 title="${escapeHtml(n.tag)}"><span class="node-n">${n.n}</span> ${escapeHtml(n.text)}
                 <span class="node-pos">${escapeHtml(n.pos)} ${escapeHtml(n.dep)}</span></div>` +
             (kids[n.local] || []).map(k => line(k, d + 1)).join('');
@@ -278,7 +283,9 @@ function renderTrees() {
         (nodes.hypothesis.length ? `<div class="tree-side">hypothesis</div>${tree('hypothesis')}` : '');
 }
 
-// Click a tree line: select that node's phrase (Shift: the word) in the editor
+// Click a tree line: select that node's phrase (Shift: the word) in the editor, and focus
+// its text on the node: words outside its subtree dim until another node, the same node
+// again, or Esc. The focus stays through 1–4 and a, so a sentence can be worked through.
 function selectNode(n, wordOnly) {
     const nodes = A.ws.parse.nodes;
     const node = [...nodes.premise, ...nodes.hypothesis].find(x => x.n === n);
@@ -286,13 +293,134 @@ function selectNode(n, wordOnly) {
     const side = node.side === 'premise' ? 'state' : 'hypothesis';
     const cid = Object.keys(containers).find(c => containers[c].side === side);
     if (!cid) return;
+    const prev = A.focus[side];
+    if (prev && prev.n === n && !wordOnly && L.selection && L.selection.start === node.phrase[0]
+        && L.selection.end === node.phrase[1]) {
+        clearFocus(side);       // the same node again: unfocus
+        L.selection = null;
+        paintTokens();
+        return setBanner(null);
+    }
+    A.focus[side] = { n, start: node.phrase[0], end: node.phrase[1] };
+    applyFocus();
     const [start, end] = wordOnly ? [node.start, node.end] : node.phrase;
     const cps = codePoints(cid);
     L.selection = { cid, side, pointer: null, option: undefined, start, end, text: cps.slice(start, end).join('') };
     setRegion(side === 'state' ? 'state' : 'hypothesis');
     paintTokens();
     setBanner(`Selected ${wordOnly ? 'word' : 'phrase'} ${n}: “${L.selection.text}”. ${side === 'hypothesis'
-        ? '1–4 makes it a clause.' : 'a links it to the active clause.'}`);
+        ? '1–4 makes it a clause.' : 'a links it to the active clause.'} (Esc or the same node again clears the focus.)`);
+}
+
+function applyFocus() {
+    for (const [side, view] of [['state', '#state-view'], ['hypothesis', '#hypothesis-view']]) {
+        const f = A.focus && A.focus[side];
+        document.querySelectorAll(`${view} .tok`).forEach(t => t.classList.toggle('dim',
+            !!f && !(+t.dataset.s < f.end && +t.dataset.e > f.start)));
+    }
+    const focused = new Set(Object.values(A.focus || {}).map(f => String(f.n)));
+    document.querySelectorAll('.tree-node').forEach(el => el.classList.toggle('focused', focused.has(el.dataset.n)));
+}
+
+function clearFocus(side) {
+    if (side) delete A.focus[side];
+    else A.focus = {};
+    applyFocus();
+}
+
+// ============================================================================
+// Helpers: matching words, filling the rest as unaddressed
+// ============================================================================
+
+const CONTENT_POS = new Set(['NOUN', 'PROPN', 'NUM', 'VERB', 'ADJ', 'ADV', 'PRON']);
+const EDGE_POS = new Set(['DET', 'AUX', 'ADP', 'CCONJ', 'SCONJ', 'PART', 'PUNCT', 'SYM', 'X', 'SPACE']);
+
+function matchKey(text) {
+    let w = text.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+    if (w.length > 3 && w.endsWith('s') && !/\d/.test(w)) w = w.slice(0, -1);   // plural: a cheap stem
+    return w;
+}
+
+// Words of the hypothesis that also occur in the premise (names, dates, numbers, content words)
+function paintMatches() {
+    document.querySelectorAll('.tok.match').forEach(t => { t.classList.remove('match'); delete t.dataset.m; });
+    if (!A.ws || !document.getElementById('annot-show-matches').checked) return;
+    const nodes = A.ws.parse.nodes;
+    const hypKeys = new Set(nodes.hypothesis.filter(n => CONTENT_POS.has(n.pos) && n.pos !== 'PRON')
+                                            .map(n => matchKey(n.text)).filter(k => k.length > 1));
+    const premKeys = new Set(nodes.premise.map(n => matchKey(n.text)));
+    const mark = (view, list) => {
+        const byStart = {};
+        document.querySelectorAll(`${view} .tok`).forEach(t => { byStart[t.dataset.s] = t; });
+        list.forEach(n => {
+            const k = matchKey(n.text);
+            const t = byStart[n.start];
+            if (t && hypKeys.has(k) && premKeys.has(k)) {
+                t.classList.add('match');
+                t.dataset.m = k;
+            }
+        });
+    };
+    mark('#state-view', nodes.premise);
+    mark('#hypothesis-view', nodes.hypothesis);
+    const n = document.querySelectorAll('#hypothesis-view .tok.match').length;
+    document.getElementById('annot-match-count').textContent = n ? `${n} matched` : '';
+}
+
+// U: every stretch of hypothesis words that no clause covers becomes one unaddressed clause
+// (trimmed of edge function words; only stretches with a content word)
+function fillUnaddressed() {
+    const hyp = A.ws.parse.nodes.hypothesis;
+    const covered = n => L.clauses.some(c => n.start < c.end && n.end > c.start);
+    const runs = [];
+    let run = [];
+    hyp.forEach(n => {
+        if (covered(n)) {
+            if (run.length) runs.push(run);
+            run = [];
+        } else run.push(n);
+    });
+    if (run.length) runs.push(run);
+    const cid = Object.keys(containers).find(c => containers[c].side === 'hypothesis');
+    const cps = codePoints(cid);
+    let added = 0;
+    labelAction(() => {
+        runs.forEach(r => {
+            while (r.length && EDGE_POS.has(r[0].pos)) r.shift();
+            while (r.length && EDGE_POS.has(r[r.length - 1].pos)) r.pop();
+            if (!r.some(n => CONTENT_POS.has(n.pos))) return;
+            const start = r[0].start, end = r[r.length - 1].end;
+            L.clauses.push({ start, end, text: cps.slice(start, end).join(''), stance: 'unaddressed', omission: false,
+                             note: null, evidence: [] });
+            added++;
+        });
+        L.clauses.sort((a, b) => a.start - b.start);
+    });
+    setBanner(added ? `Marked ${added} uncovered stretch${added > 1 ? 'es' : ''} unaddressed (z undoes).`
+        : 'Every content word is already in a clause.');
+}
+
+// ============================================================================
+// Relations of the version being edited (the agent adds them; × removes one)
+// ============================================================================
+
+function spanText(s) {
+    return `${escapeHtml(s.text || '')} <span class="node-pos">[${(s.nodes || []).join(',')}]</span>`;
+}
+
+function renderRelations() {
+    const rels = L.relations || [];
+    document.getElementById('annot-relations').innerHTML = rels.length ? rels.map((r, i) => `<div class="note-row">
+        ${spanText(r.from)} → <strong>${escapeHtml(r.type)}</strong> → ${spanText(r.to)}
+        ${r.note ? `<span class="option-desc">${escapeHtml(r.note)}</span>` : ''}
+        <button class="chip-x" title="Remove (saved with the next version)" onclick="removeRelation(${i})">×</button></div>`).join('')
+        : '<span class="option-desc">No relations yet. Say them: “2 is the referent of 13”.</span>';
+}
+
+function removeRelation(i) {
+    L.relations.splice(i, 1);
+    renderRelations();
+    setBanner('Relation removed; Enter saves the version without it.');
 }
 
 function selectionNodes() {
@@ -321,35 +449,58 @@ function chip(stance) {
     return `<span class="stance-chip ${stance}">${stance}</span>`;
 }
 
+// One line per edit a proposal makes (proposals hold edits, applied in order on accept)
+function deltaLines(d) {
+    const q = t => `“${escapeHtml(t || '')}”`;
+    const ev = es => es.length ? ' ← ' + es.map(e => q(e.text)).join(' ') : '';
+    const out = [];
+    (d.add_clauses || []).forEach(c => out.push(`<div class="delta add">+ ${chip(c.stance)}${c.omission ? ' (omission)' : ''} ${q(c.text)}${ev(c.evidence)}</div>`));
+    (d.change_clauses || []).forEach(c => {
+        const bits = [];
+        if (c.stance) bits.push(chip(c.stance));
+        if (c.omission != null) bits.push(c.omission ? 'omission' : 'no omission');
+        if (c.span) bits.push(`span → ${q(c.span.text)}`);
+        if (c.add_evidence.length) bits.push(`+ evidence ${c.add_evidence.map(e => q(e.text)).join(' ')}`);
+        if (c.remove_evidence.length) bits.push(`− evidence ${c.remove_evidence.map(e => q(e.text)).join(' ')}`);
+        out.push(`<div class="delta change">~ ${q(c.target.text)}: ${bits.join(' · ') || 'no change'}</div>`);
+    });
+    (d.remove_clauses || []).forEach(c => out.push(`<div class="delta remove">− clause ${q(c.text)}</div>`));
+    (d.add_relations || []).forEach(r => out.push(`<div class="delta add">+ ${spanText(r.from)} → <strong>${escapeHtml(r.type)}</strong> → ${spanText(r.to)}</div>`));
+    (d.remove_relations || []).forEach(r => out.push(`<div class="delta remove">− relation ${q(r.from.text)} → ${escapeHtml(r.type)} → ${q(r.to.text)}</div>`));
+    if (d.label_override) out.push(`<div class="delta change">~ label override: ${escapeHtml(d.label_override)}</div>`);
+    if (d.completion) out.push(`<div class="delta change">~ completion: ${escapeHtml(JSON.stringify(d.completion))}</div>`);
+    return out.join('');
+}
+
 function renderProposal() {
-    const p = A.ws.proposal;
+    const ps = A.ws.proposals || [];
     const el = document.getElementById('annot-proposal');
-    document.getElementById('annot-proposal-state').textContent = p ? `#${p.id}` : '';
-    if (!p) {
-        el.innerHTML = '<span class="option-desc">No proposal waiting. Record or type what you see; the agent turns it into one.</span>';
+    document.getElementById('annot-proposal-state').textContent = ps.length ? `${ps.length} pending` : '';
+    if (!ps.length) {
+        el.innerHTML = '<span class="option-desc">No proposal waiting. Record or type what you see; each comment becomes a small proposal.</span>';
         return;
     }
-    const pl = p.payload;
-    const clauses = (pl.clauses || []).map(c => `<div>${chip(c.stance)}${c.omission ? ' (omission)' : ''} “${escapeHtml(c.text)}”
-        <span class="node-pos">[${(c.nodes || []).join(',')}]</span>
-        ${c.evidence.length ? '← ' + c.evidence.map(e => `“${escapeHtml(e.text)}”`).join(' ') : ''}</div>`).join('');
-    const rel = (pl.relations || []).map(r => `<div>${escapeHtml(r.from.text)} <span class="node-pos">[${r.from.nodes}]</span>
-        → <strong>${escapeHtml(r.type)}</strong> → ${escapeHtml(r.to.text)} <span class="node-pos">[${r.to.nodes}]</span>
-        ${r.note ? '<span class="option-desc">' + escapeHtml(r.note) + '</span>' : ''}</div>`).join('');
-    const notes = (pl.notes || []).map(n => `<div><span class="note-cat">${escapeHtml(n.category)}</span>${n.hedge ? ' ?' : ''}
-        ${escapeHtml(n.text)}</div>`).join('');
-    const qs = (pl.questions || []).map(q => `<div class="proposal-q">? ${escapeHtml(q)}</div>`).join('');
-    const probs = (p.problems || []).map(q => `<div class="proposal-problem">⚠ ${escapeHtml(q)}</div>`).join('');
-    const label = pl.label ? `<span class="label-${pl.label}">${pl.label}</span>` : '<em>no valid label</em>';
-    el.innerHTML = `<div class="proposal-label">Label: ${label}${pl.label_override ? ' (override)' : ''}
-            ${p.stale ? ' <span class="badge-warn">made on an older parse</span>' : ''}</div>
-        ${clauses}${rel ? '<div class="proposal-sub">relations</div>' + rel : ''}
-        ${notes ? '<div class="proposal-sub">new notes</div>' + notes : ''}${qs}${probs}
+    const v = A.ws.pending_view || {};
+    const label = v.label ? `<span class="label-${v.label}">${v.label}</span>` : '–';
+    const items = ps.map(p => {
+        const pl = p.payload;
+        const notes = (pl.notes || []).map(n => `<div class="delta add">+ <span class="note-cat">${escapeHtml(n.category)}</span>${n.hedge ? ' ?' : ''} ${escapeHtml(n.text)}</div>`).join('');
+        const qs = (pl.questions || []).map(q => `<div class="proposal-q">? ${escapeHtml(q)}</div>`).join('');
+        const probs = (p.problems || []).map(q => `<div class="proposal-problem">⚠ ${escapeHtml(q)}</div>`).join('');
+        const said = A.ws.utterances.filter(u => p.utterance_ids.includes(u.id)).map(u => escapeHtml(u.text || '')).join(' / ');
+        const legacy = !pl.delta && pl.clauses ? '<div class="proposal-problem">⚠ an older full-annotation proposal: accept replaces nothing; use edit first</div>' : '';
+        return `<div class="proposal-item"><div class="utt-meta">#${p.id} · “${said.slice(0, 160)}”
+                ${p.stale ? ' <span class="badge-warn">older parse</span>' : ''}
+                <button class="btn btn-small" onclick="acceptProposal(false, ${p.id})" title="Accept this and every earlier pending one">accept to here</button>
+                <button class="btn btn-small" onclick="rejectProposal(${p.id})">reject</button></div>
+            ${deltaLines(pl.delta || {}) || '<div class="option-desc">no edits</div>'}${notes}${qs}${probs}${legacy}</div>`;
+    }).join('');
+    el.innerHTML = `<div class="proposal-label">All pending applied: ${label}${v.label_override ? ' (override)' : ''}</div>
+        ${items}
         <div class="proposal-actions">
-            <button class="btn btn-success btn-small" onclick="acceptProposal()" title="Accept as the next version (y)">accept</button>
-            <button class="btn btn-small" onclick="editProposal()" title="Load into the editor; Enter accepts it as edited">edit first</button>
-            <button class="btn btn-small" onclick="rejectProposal()">reject</button>
-            <button class="btn btn-small" onclick="document.getElementById('annot-text').focus()">reply</button>
+            <button class="btn btn-success btn-small" onclick="acceptProposal()" title="Accept every pending proposal as the next version (y)">accept all</button>
+            <button class="btn btn-small" onclick="editProposal()" title="Load the stacked result into the editor; Enter accepts it as edited">edit first</button>
+            <button class="btn btn-small" onclick="document.getElementById('annot-text').focus()">add more</button>
         </div>`;
 }
 
@@ -389,6 +540,7 @@ async function reloadList() {
 
 // label.js submitItem hands the clause body here in annotator mode
 async function annotatorSubmit(body, override) {
+    body.relations = L.relations || [];   // the version's relations, as shown (× removes one)
     if (L.fromProposal) {
         const resp = await postJson(`/api/annotator/proposals/${L.fromProposal}/accept`,
                                     { edits: body, policy_override: override });
@@ -398,30 +550,37 @@ async function annotatorSubmit(body, override) {
     return afterSave(resp, 'Saved');
 }
 
-async function acceptProposal(override = false) {
-    const p = A.ws && A.ws.proposal;
-    if (!p) return;
-    const resp = await postJson(`/api/annotator/proposals/${p.id}/accept`, {
+// Accept every pending proposal up to `id` (default: all), applied in order to the current version
+async function acceptProposal(override = false, id = null) {
+    const ps = (A.ws && A.ws.proposals) || [];
+    if (!ps.length) return;
+    const through = id || ps[ps.length - 1].id;
+    const resp = await postJson(`/api/annotator/proposals/${through}/accept`, {
         policy_override: override, note: document.getElementById('note').value || null,
         active_ms: Math.round(L.timer.active) });
     return afterSave(resp, 'Accepted');
 }
 
+// Load the stacked result (latest version + every pending proposal) into the editor
 function editProposal() {
-    const p = A.ws && A.ws.proposal;
-    if (!p) return;
+    const ps = (A.ws && A.ws.proposals) || [];
+    const v = A.ws && A.ws.pending_view;
+    if (!ps.length || !v) return;
     labelAction(() => {
-        L.clauses = (p.payload.clauses || []).map(c => ({ start: c.start, end: c.end, text: c.text, stance: c.stance,
-            omission: c.omission, note: null, evidence: c.evidence.map(({ start, end, text }) => ({ start, end, text })) }));
+        L.clauses = (v.clauses || []).map(c => ({ start: c.start, end: c.end, text: c.text, stance: c.stance,
+            omission: !!c.omission, note: null, evidence: c.evidence.map(({ start, end, text }) => ({ start, end, text })) }));
         L.activeClause = L.clauses.length ? 0 : -1;
-        L.labelOverride = p.payload.label_override || null;
+        L.labelOverride = v.label_override || null;
     });
-    L.fromProposal = p.id;
-    setBanner(`Editing proposal #${p.id}. Enter accepts it as edited; Esc leaves it pending.`);
+    L.relations = (v.relations || []).map(r => ({ ...r }));
+    renderRelations();
+    L.fromProposal = ps[ps.length - 1].id;
+    setBanner(`Editing the ${ps.length} pending proposal${ps.length > 1 ? 's' : ''} together. Enter accepts the result as edited; Esc leaves them pending.`);
 }
 
-async function rejectProposal() {
-    const p = A.ws && A.ws.proposal;
+async function rejectProposal(id = null) {
+    const ps = (A.ws && A.ws.proposals) || [];
+    const p = id ? ps.find(x => x.id === id) : ps[ps.length - 1];
     if (!p) return;
     const resp = await postJson(`/api/annotator/proposals/${p.id}/reject`);
     if (resp.ok) {
@@ -522,12 +681,16 @@ function annotKeyDown(e) {
     if (k === 'v') toggleRecording();
     else if (k === ',') annotStep(-1);
     else if (k === '.') annotStep(1);
-    else if (k === 'y' && A.ws && A.ws.proposal) acceptProposal(false);
+    else if (k === 'y' && A.ws && (A.ws.proposals || []).length) acceptProposal(false);
     else if (k === 'R') toggleReference();
+    else if (k === 'U') fillUnaddressed();
     else if (k === 'x' || k === 'e') setBanner('In the Dataset view, skipping and "edit earlier" are not needed: every item stays open.');
     else if (k === 'Escape' && L.fromProposal && !L.selection) {
         L.fromProposal = null;
         openWorkspace(L.annot.itemId);
+    } else if (k === 'Escape' && !L.selection && Object.keys(A.focus || {}).length) {
+        clearFocus();
+        setBanner(null);
     } else return false;
     e.preventDefault();
     return true;
